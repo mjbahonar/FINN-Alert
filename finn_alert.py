@@ -146,7 +146,7 @@ class Bot:
                     raise ServiceError("google_cloud requires google_api_key")
                 r = request(self.session, "POST", "https://translation.googleapis.com/language/translate/v2",
                             headers={"X-Goog-Api-Key": key},
-                            json={"q": part, "target": "en", "format": "text"})
+                            json={"q": part, "target": "en", "format": "text", "model": "nmt"})
                 try:
                     value = r.json()["data"]["translations"][0]["translatedText"]
                 except (ValueError, KeyError, IndexError, TypeError):
@@ -174,6 +174,17 @@ class Bot:
             ok = False
         if not ok:
             raise ServiceError("Telegram rejected the message")
+
+    def listing_messages(self, url, title, description):
+        original = title + "\n\n" + description
+        try:
+            body = self.translate(original)
+            heading = "FINN | English"
+        except ServiceError as exc:
+            LOG.warning("Translation failed; sending original listing: %s", exc)
+            body = original
+            heading = "FINN | Translation failed. Original text follows."
+        return [f"{heading}\n{url}\n\n{part}" for part in chunks(body, 1700)]
 
     def enqueue(self, items):
         # Baselines belong to a search, so changing filters starts a new baseline.
@@ -204,9 +215,7 @@ class Bot:
                         LOG.error("Listing %s has no readable description; retained for a later poll", ident)
                         failed = True
                         continue
-                    english = self.translate(title + "\n\n" + desc)
-                    # <= 3600 UTF-16 units including link, below Telegram's limit.
-                    messages = [f"FINN | English\n{url}\n\n{p}" for p in chunks(english, 1700)]
+                    messages = self.listing_messages(url, title, desc)
                     with self.db:
                         self.db.execute("UPDATE ads SET messages=? WHERE id=?", (json.dumps(messages), ident))
                 else:
@@ -256,7 +265,7 @@ def main():
             items, _ = parse_search(bot.fetch(c["search_url"]), c["search_url"])
             url = next(iter(items.values()))
             title, desc = parse_detail(bot.fetch(url))
-            print(url + "\n\n" + bot.translate(title + "\n\n" + desc))
+            print("\n\n---\n\n".join(bot.listing_messages(url, title, desc)))
             return 0
         if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
             raise ValueError("Set a valid Telegram bot token in config or TELEGRAM_BOT_TOKEN")

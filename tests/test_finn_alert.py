@@ -59,6 +59,34 @@ class Tests(unittest.TestCase):
         self.bot.send.assert_called_once_with("second")
         self.assertEqual(self.db.execute("SELECT status FROM ads").fetchone()[0], "sent")
 
+    def test_translation_failure_sends_original_and_marks_sent(self):
+        self.bot.enqueue({"123": ITEM})
+        self.bot.fetch = Mock(return_value='<h1 data-testid="object-title">Sofa</h1><section data-testid="description"><div class="whitespace-pre-wrap">Original description</div></section>')
+        self.bot.translate = Mock(side_effect=ServiceError('HTTP 429'))
+        self.bot.send = Mock(side_effect=lambda _: STOP.set())
+        self.assertTrue(self.bot.deliver())
+        message = self.bot.send.call_args.args[0]
+        self.assertIn('Translation failed. Original text follows.', message)
+        self.assertIn('Original description', message)
+        self.assertIn(ITEM, message)
+        self.assertEqual(self.db.execute('SELECT status FROM ads').fetchone()[0], 'sent')
+
+    def test_successful_translation_uses_english(self):
+        self.bot.translate = Mock(return_value='English title and description')
+        self.assertEqual(self.bot.listing_messages(ITEM, 'Original', 'Description'),
+                         [f'FINN | English\n{ITEM}\n\nEnglish title and description'])
+
+    def test_fallback_is_cached_when_telegram_fails(self):
+        self.bot.enqueue({'123': ITEM})
+        self.bot.fetch = Mock(return_value='<h1 data-testid="object-title">Sofa</h1><section data-testid="description"><div class="whitespace-pre-wrap">Description</div></section>')
+        self.bot.translate = Mock(side_effect=ServiceError('HTTP 429'))
+        self.bot.send = Mock(side_effect=ServiceError('Telegram unavailable'))
+        self.assertFalse(self.bot.deliver())
+        self.bot.send = Mock(side_effect=lambda _: STOP.set())
+        self.assertTrue(self.bot.deliver())
+        self.bot.translate.assert_called_once()
+        self.bot.fetch.assert_called_once()
+
     def test_long_emoji_chunks_fit_telegram(self):
         text = "😀 " * 10000
         parts = list(chunks(text, 1700))

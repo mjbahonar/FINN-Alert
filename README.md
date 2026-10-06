@@ -1,10 +1,14 @@
-# FINN Alert — ارسال آگهی‌های جدید به تلگرام
+# FINN Alert
 
-پایتون 3.10 یا جدیدتر، مناسب Ubuntu 22.04 / 24.04. جست‌وجوی ارائه‌شده از FINN هر ۳۰۰ ثانیه بررسی می‌شود. لینک آگهی و ترجمهٔ انگلیسی عنوان و متن کامل آن به گروه یا کانال می‌رود. متن بلند به چند پیام تقسیم می‌شود. فایل SQLite آگهی‌های دیده‌شده و صف ارسال را نگه می‌دارد.
+Monitor a FINN search and send new listings to a Telegram group or channel. Notifications contain the listing link and an English translation of the title and full description. If translation fails, the original text is sent with this English notice:
 
-## نصب روی اوبونتو
+> Translation failed. Original text follows.
 
-فایل‌های این پوشه را به `/opt/finn-alert` روی سرور کپی کنید، سپس:
+Requires Python 3.10+. Ubuntu 22.04 / 24.04 supported. Polling defaults to five minutes. SQLite preserves delivery state across restarts; long descriptions are split into messages.
+
+## Install on Ubuntu
+
+Copy the project to `/opt/finn-alert`, then run:
 
 ```bash
 sudo apt update
@@ -19,25 +23,55 @@ sudo chmod 600 config.json
 sudo nano config.json
 ```
 
-اگر کاربر `finn-alert` از قبل وجود دارد، دستور `useradd` را تکرار نکنید.
+Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo -u finn-alert .venv/bin/python` in the commands below.
 
-در فایل `config.json` این مقادیر را تنظیم کنید:
+## Configuration
 
-| گزینه | کاربرد |
+| Setting | Purpose |
 |---|---|
-| `telegram.bot_token` | توکن بات ساخته‌شده با @BotFather |
-| `telegram.chat_id` | مثلاً `@channel_username` یا شناسهٔ عددی گروه/کانال خصوصی مانند `-1001234567890` |
-| `poll_interval_seconds` | فاصلهٔ شروع بررسی‌ها؛ پیش‌فرض ۳۰۰ ثانیه |
-| `max_pages` | تعداد صفحه‌های جست‌وجو در هر بررسی؛ پیش‌فرض ۳ |
-| `request_delay_seconds` | مکث بین درخواست‌ها؛ پیش‌فرض ۲ ثانیه |
-| `initial_mode` | `send`: ارسال آگهی‌های موجود در محدودهٔ بررسی در اجرای اول؛ `skip`: ثبت آن‌ها بدون ارسال و ارسال فقط موارد جدید از بررسی بعد |
-| `translation.provider` | `google_web` یا `google_cloud` |
-| `translation.google_api_key` | فقط برای روش رسمی `google_cloud` |
-| `database` | مسیر SQLite، نسبت به پوشهٔ کانفیگ |
+| `search_url` | FINN URL with location and other filters |
+| `poll_interval_seconds` | Interval between poll starts; default `300` |
+| `max_pages` | Maximum search pages per poll; default `3` |
+| `request_delay_seconds` | Request delay; default `2` seconds |
+| `initial_mode` | `send`: send existing results on first run; `skip`: baseline existing results and send only newly discovered listings |
+| `database` | SQLite path relative to the configuration file |
+| `telegram.bot_token` | Complete BotFather token |
+| `telegram.chat_id` | Numeric group/private-channel ID or public channel `@username` |
+| `translation.provider` | `google_web` or `google_cloud` |
+| `translation.google_api_key` | API key for `google_cloud` |
 
-بات را به گروه اضافه کنید و اجازهٔ ارسال پیام بدهید. برای کانال، بات باید ادمین با دسترسی انتشار پیام باشد. برای کانال عمومی می‌توانید مستقیماً از `@username` استفاده کنید.
+Environment variables `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `GOOGLE_TRANSLATE_API_KEY` override the corresponding values. Restart after editing the configuration.
 
-برای به‌دست‌آوردن شناسهٔ گروه خصوصی، بات را اضافه کنید، یک دستور مثل `/start@YourBotUsername` در گروه بفرستید و روی کامپیوتر خود این کد را اجرا کنید. توکن به‌صورت مخفی پرسیده می‌شود؛ فقط شناسه و نام چت چاپ می‌شود:
+## Telegram setup and group ID
+
+1. Create a bot with @BotFather and copy the complete token.
+2. Add it to your group and allow messages. For channels, grant administrator permission to post.
+3. Send `/start@YourBotUsername` inside the group, replacing the username.
+4. Open this URL locally, replacing `YOUR_BOT_TOKEN`:
+
+```text
+https://api.telegram.org/botYOUR_BOT_TOKEN/getUpdates
+```
+
+Find the `chat` object whose `title` matches your group:
+
+```json
+"chat": {
+  "id": -1001234567890,
+  "title": "My group",
+  "type": "supergroup"
+}
+```
+
+Use the actual `chat.id` with its minus sign, without `@`:
+
+```json
+"chat_id": "-1001234567890"
+```
+
+Do not use `from.id`, which identifies the sender. If `result` is empty, send the group command again and refresh. An active webhook prevents `getUpdates`; another bot application may consume updates. This notifier only sends messages and does not consume updates.
+
+To avoid placing the token in browser history, run this locally instead:
 
 ```bash
 .venv/bin/python - <<'PY'
@@ -53,85 +87,93 @@ for update in data.get('result', []):
 PY
 ```
 
-این روش برای باتی است که webhook یا مصرف‌کنندهٔ دیگر `getUpdates` ندارد. برنامهٔ اصلی فقط پیام ارسال می‌کند و آپدیت‌های بات را مصرف نمی‌کند. متغیرهای محیطی `TELEGRAM_BOT_TOKEN`، `TELEGRAM_CHAT_ID` و `GOOGLE_TRANSLATE_API_KEY` نیز می‌توانند مقدارهای کانفیگ را جایگزین کنند.
+### Telegram 404 / token troubleshooting
 
-### گرفتن شناسهٔ گروه از مرورگر
-
-۱. بات خودتان را به گروه اضافه کنید و در همان گروه `/start@YourBotUsername` بفرستید؛ نام کاربری واقعی بات را جایگزین کنید.
-
-۲. در آدرس زیر، `YOUR_BOT_TOKEN` را با کل توکن BotFather جایگزین کنید و آدرس را در مرورگر باز کنید:
-
-```text
-https://api.telegram.org/botYOUR_BOT_TOKEN/getUpdates
-```
-
-۳. در خروجی، بخش `chat` را که `title` آن نام گروه شماست پیدا کنید:
-
-```json
-"chat": {
-  "id": -1001234567890,
-  "title": "گروه من",
-  "type": "supergroup"
-}
-```
-
-۴. عدد `chat.id` را با علامت منفی، بدون افزودن `@`، در کانفیگ وارد کنید؛ `from.id` شناسهٔ فرستنده است و برای این کار مناسب نیست:
-
-```json
-"chat_id": "-1001234567890"
-```
-
-عدد مثال را کپی نکنید؛ عدد واقعی گروه خودتان را استفاده کنید. اگر `result` خالی بود، دستور مرحلهٔ اول را دوباره در گروه بفرستید و صفحه را تازه کنید. اگر بات webhook فعال یا برنامهٔ دیگری برای دریافت آپدیت‌ها دارد، `getUpdates` ممکن است خطا بدهد یا آپدیت‌ها قبلاً مصرف شده باشند. توکن و آدرس دارای توکن را منتشر نکنید؛ روش ترمینال بالا توکن را وارد تاریخچهٔ مرورگر نمی‌کند.
-
-### رفع خطای 404 و بررسی توکن
-
-برای پاسخ `{"ok":false,"error_code":404,"description":"Not Found"}` ابتدا ساختار URL را بررسی کنید. کلمهٔ `bot` باید دقیقاً قبل از توکن و بدون فاصله باشد. کل توکن، شامل دو بخش قبل و بعد از `:`، لازم است؛ علامت‌های `< >`، کوتیشن یا فاصله را وارد نکنید. ساختار نمونه با توکن ساختگی:
+For `{"ok":false,"error_code":404,"description":"Not Found"}`, check the URL. Keep the literal `bot` immediately before the complete token, including both parts separated by `:`. Do not add spaces, quotes, or angle brackets. Example with a fake token:
 
 ```text
 https://api.telegram.org/bot123456789:ABCDEF_example/getMe
 ```
 
-توکن واقعی را جایگزین کنید. پاسخ `"ok":true` به `getMe` همراه مشخصات بات، صحت توکن را تأیید می‌کند؛ سپس `getMe` را به `getUpdates` تغییر دهید. خطای 401 معمولاً نشان‌دهندهٔ توکن نامعتبر یا باطل‌شده است. اگر خطا باقی ماند، فقط کد و توضیح خطا را برای عیب‌یابی بفرستید، نه توکن یا URL حاوی آن.
+Replace the token. `getMe` returning `"ok":true` confirms authentication; then change `getMe` to `getUpdates`. HTTP 401 generally means an invalid/revoked token. Never share the token or a URL containing it.
 
-مراجع: [getUpdates](https://core.telegram.org/bots/api#getupdates)، [getMe](https://core.telegram.org/bots/api#getme).
+References: [getUpdates](https://core.telegram.org/bots/api#getupdates), [getMe](https://core.telegram.org/bots/api#getme).
 
-## آزمایش و اجرای دائمی
+## Google translation
 
-بررسی توکن، مقصد تلگرام، دریافت FINN و ترجمه، بدون ارسال پیام:
+### Website method
+
+`google_web` uses the Google Translate website without a key. This unofficial method may encounter CAPTCHA, HTTP 429, or changed HTML. The local test encountered HTTP 429. Translation errors now trigger original-text delivery instead of blocking notifications.
+
+### Official API setup
+
+This program supports **Cloud Translation Basic v2, standard NMT**, with English as the target language.
+
+1. Open [Google Cloud Console](https://console.cloud.google.com/) and create or select a project.
+2. Link a billing account. Billing must be enabled even within the free allowance.
+3. Under **APIs & Services > Library**, enable **Cloud Translation API**.
+4. Under **APIs & Services > Credentials > Create credentials > API key**, create an API key for Basic v2.
+5. Restrict the key to Cloud Translation API. If using IP restrictions, allow the public IP of the machine running this script, including the development machine during testing.
+6. Replace the existing translation section in your private `config.json`:
+
+```json
+"translation": {
+  "provider": "google_cloud",
+  "google_api_key": "YOUR_GOOGLE_CLOUD_API_KEY"
+}
+```
+
+Alternatively supply `GOOGLE_TRANSLATE_API_KEY` in the process environment. Never commit your real key.
+
+7. Run `python check_connection.py` and look for `Google translation (google_cloud): OK`. Restart the service after changing configuration.
+
+Official references: [setup](https://docs.cloud.google.com/translate/docs/setup), [authentication](https://docs.cloud.google.com/translate/docs/authentication), [Basic v2 API](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate).
+
+### Pricing
+
+Checked October 6, 2026: standard NMT includes the first **500,000 input characters per month**, applied as a **$10 monthly credit**. Standard usage above that allowance costs **$20 per million characters** at the standard rate. Characters are not words or requests. The allowance renews monthly and is shared across Basic and Advanced usage; do not assume each key gives another allowance. Other models and document translation have different prices.
+
+For example, one million NMT input characters in a month costs approximately $10 after the credit, excluding other usage and taxes. The application does not enforce a monthly character cap. Monitor usage and configure quotas and billing alerts; budget alerts alone do not stop spending.
+
+Check [current pricing](https://cloud.google.com/products/translate/pricing) before enabling paid usage.
+
+## Testing
+
+Check connectivity and translation without sending:
 
 ```bash
 sudo -u finn-alert .venv/bin/python check_connection.py
 ```
 
-برای همین بررسی‌ها به‌همراه ارسال **فقط یک پیام آزمایشی** به مقصد کانفیگ:
+Send exactly one connectivity test message during those checks:
 
 ```bash
 sudo -u finn-alert .venv/bin/python check_connection.py --send-test
 ```
 
-این ابزار دیتابیس اصلی را تغییر نمی‌دهد و وضعیت هر سرویس را جداگانه نشان می‌دهد. در ویندوز به‌جای پیشوند `sudo -u finn-alert .venv/bin/python` از `python` استفاده کنید.
-
-### آزمایش محلی ۱۵ دقیقه‌ای
-
-```bash
-python local_trial.py --seconds 900
-```
-
-این اجرا پس از ۱۵ دقیقه خودکار متوقف می‌شود (اگر درخواست شبکه‌ای در حال اجرا باشد، پایان آن ممکن است کمی دیرتر باشد). تنظیمات `config.json` را می‌خواند و دیتابیس جداگانهٔ `trial-*.sqlite3` می‌سازد؛ سابقهٔ سرویس اصلی تغییر نمی‌کند. آگهی‌های موجود را بدون ارسال ثبت می‌کند و تنها یک آگهی موجود را به‌عنوان نمونه، به‌علاوهٔ آگهی‌های جدید کشف‌شده، برای ترجمه و ارسال واقعی در گروه قرار می‌دهد. فاصلهٔ بررسی همان مقدار کانفیگ است. تعداد آگهی‌های ارسال‌شده و در انتظار در لاگ نمایش داده می‌شود. اگر ترجمه مسدود باشد، گذشت ۱۵ دقیقه به‌تنهایی به معنی موفقیت کل مسیر نیست.
-
-پیش‌نمایش یک آگهی با ترجمه، بدون ارسال تلگرام و بدون تغییر دیتابیس:
+Preview one listing without Telegram delivery or database changes:
 
 ```bash
 sudo -u finn-alert .venv/bin/python finn_alert.py --preview
 ```
 
-اجرای یک بار بررسی **و ارسال واقعی**:
+Preview uses the original-text fallback if translation fails. Use `check_connection.py` to verify translation independently.
+
+Run one poll with **real listing delivery**:
 
 ```bash
 sudo -u finn-alert .venv/bin/python finn_alert.py --once
 ```
 
-نصب سرویس دائمی، اجرای خودکار بعد از روشن‌شدن سرور و مشاهدهٔ لاگ:
+### Bounded local trial
+
+```bash
+python local_trial.py --seconds 900
+```
+
+Runs for 15 minutes using `config.json` and an isolated `trial-*.sqlite3` database. Existing listings are baselined; only one existing sample and newly discovered listings are sent. The configured polling interval applies. It may stop slightly later if a network request is in progress. Logs report sent/pending counts. Fallback delivery confirms notifications, not successful translation.
+
+## Ubuntu service
 
 ```bash
 sudo cp finn-alert.service /etc/systemd/system/
@@ -141,28 +183,25 @@ sudo systemctl status finn-alert
 sudo journalctl -u finn-alert -f
 ```
 
-بعد از تغییر کانفیگ: `sudo systemctl restart finn-alert`. برای توقف: `sudo systemctl stop finn-alert`.
+Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: `sudo systemctl stop finn-alert`.
 
-## ترجمه و رفتار هنگام خطا
+## Delivery behavior and limitations
 
-`google_web` از وب‌سایت Google Translate استفاده می‌کند، کلید لازم ندارد و غیررسمی است؛ ممکن است گوگل آن را محدود کند یا HTML تغییر کند. گزینهٔ `google_cloud` از [API رسمی Google Cloud Translation Basic](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate) استفاده می‌کند؛ پروژه، فعال‌سازی سرویس، کلید معتبر و تنظیمات صورتحساب گوگل لازم است. هزینه تابع تعرفه و مصرف حساب شماست.
+- All program-generated messages and documentation are English. When translation fails, the seller's original text remains in its original language, with an English warning.
+- Successfully delivered fallback listings are marked sent and are not later resent as translations. Telegram failures retain prepared messages for retry without repeating translation.
+- Message parts are checkpointed individually. A crash between Telegram delivery and SQLite recording it, or a timeout with an unknown outcome, can cause duplication. Exactly-once delivery is not guaranteed.
+- Preserve the database across restarts; use a different database for a different Telegram destination.
+- Empty/blocked pages do not establish a baseline. FINN markup changes and removed listings may prevent extraction. CAPTCHA bypass and account login are not implemented.
+- Every configured search page is scanned. Listings removed between polls or pushed beyond `max_pages` can be missed, especially after downtime. Featured listings can affect chronological ordering.
+- A long delivery queue can delay the next poll. Linux file locking prevents two production instances sharing the same database.
 
-در آزمایش این محیط، روش رایگان به کپچای گوگل رسید و ترجمهٔ زنده تأیید نشد. قبل از فعال‌کردن سرویس، `--preview` را روی سرور خود اجرا کنید؛ اگر همین محدودیت وجود داشت، `provider` را روی `google_cloud` بگذارید و کلید خود را وارد کنید. API رسمی بدون کلید واقعی آزمایش نشده است.
-
-اگر ترجمه یا ارسال شکست بخورد، آگهی در صف می‌ماند تا در نوبت بعد دوباره امتحان شود. ترجمهٔ آماده ذخیره می‌شود و برای تلاش مجدد ارسال ترجمه نمی‌شود. پیام‌های موفق هر آگهی جداگانه ثبت می‌شوند. در بازهٔ بسیار کوتاه بین موفقیت تلگرام و ثبت در SQLite، یا هنگام timeout با نتیجهٔ نامعلوم، امکان تکرار یک پیام وجود دارد؛ Bot API تضمین exactly-once ندارد. دیتابیس را برای حفظ سابقه حذف نکنید و آن را میان چند مقصد به اشتراک نگذارید؛ برای مقصد جدید از فایل دیتابیس جدید استفاده کنید.
-
-صفحه‌های خالی یا مسدودشده موفق تلقی نمی‌شوند و baseline را تغییر نمی‌دهند. آگهی با ساختار توضیحات نامعتبر برای بررسی بعد باقی می‌ماند. دریافت HTML معمولی است؛ دورزدن کپچا یا ورود به حساب پیاده‌سازی نشده است. تعداد `max_pages` را با حجم آگهی‌ها و مدت قطعی هماهنگ کنید: آگهی‌هایی که بین دو بررسی منتشر و حذف شوند، یا از این محدوده خارج شوند ممکن است دیده نشوند. برنامه همهٔ صفحه‌های تنظیم‌شده را بررسی می‌کند و در اولین آگهی تکراری متوقف نمی‌شود. ترتیب ارسال بر اساس ترتیب نتایج است؛ نتایج ویژه ممکن است ترتیب دقیق زمانی نداشته باشند.
-
-فاصلهٔ بررسی از شروع هر دور محاسبه می‌شود؛ اگر ارسال صف بیشتر طول بکشد، بررسی بعد از پایان آن انجام می‌شود. فایل کانفیگ در شروع برنامه خوانده می‌شود. یک قفل در اوبونتو جلوی اجرای همزمان دو نمونه روی یک دیتابیس را می‌گیرد.
-
-## آزمون‌ها
+## Tests and Git
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
+git status
 ```
 
-آزمون‌ها بدون ارسال پیام و بدون اتصال شبکه اجرا می‌شوند. در تست زندهٔ ۶ اکتبر ۲۰۲۶، اعتبار توکن (`getMe`)، دسترسی به گروه (`getChat`) و ارسال یک پیام آزمایشی همگی موفق بودند. دریافت ۵۴ آگهی از صفحهٔ اول FINN و استخراج متن یک آگهی نیز موفق بود. ترجمهٔ `google_web` با HTTP 429 محدود شد؛ بنابراین ارسال کامل آگهی ترجمه‌شده در این محیط هنوز تأیید نشده است. برای رفع این بخش، API رسمی گوگل را تنظیم کنید یا پیش‌نمایش را روی سرور مقصد آزمایش کنید.
+Tests run without network calls or real messages. Live Telegram authentication, group lookup, test delivery, and FINN extraction succeeded on October 6, 2026. Website translation returned HTTP 429; official API translation needs a real key for a live test.
 
-## Git
-
-این پوشه مخزن Git محلی است. `config.json`، فایل‌های `.env`، دیتابیس و لاگ‌ها در `.gitignore` هستند و نباید commit شوند. تنظیمات قابل اشتراک در `config.example.json` قرار دارد. برای دیدن تغییرات از `git status` استفاده کنید. ساخت مخزن روی GitHub و push نیازمند انتخاب مقصد است؛ مخزن محلی به‌تنهایی چیزی را منتشر نمی‌کند.
+The local Git repository ignores `config.json`, `.env` files, databases, and logs. Share `config.example.json` only. No GitHub remote is configured automatically.
