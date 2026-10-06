@@ -1,0 +1,23 @@
+[Unit]
+Description=FINN alerts to Telegram
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=finn-alert
+Group=finn-alert
+WorkingDirectory=/opt/finn-alert
+ExecStart=/opt/finn-alert/.venv/bin/python /opt/finn-alert/finn_alert.py --config /opt/finn-alert/config.json
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=70
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/finn-alert
+
+[Install]
+WantedBy=multi-user.target

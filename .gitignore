@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+config.json
+.env
+.env.*
+!.env.example
+*.log
+*.sqlite3*
+finn-*-sample.html
+finn-sample.html

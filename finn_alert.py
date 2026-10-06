@@ -1,0 +1,298 @@
+"""FINN search -> durable SQLite queue -> Google translation -> Telegram."""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import json
+import logging
+import os
+from pathlib import Path
+import re
+import signal
+import sqlite3
+import threading
+import time
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+
+import requests
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString, TemplateString
+
+LOG = logging.getLogger("finn-alert")
+STOP = threading.Event()
+
+
+class ServiceError(Exception):
+    pass
+
+
+def finn_url(url):
+    p = urlsplit(url)
+    if p.scheme != "https" or p.netloc != "www.finn.no":
+        raise ValueError("Expected an https://www.finn.no URL")
+    return url
+
+
+def load_config(path):
+    c = json.loads(path.read_text(encoding="utf-8-sig"))
+    finn_url(c["search_url"])
+    for name in ("poll_interval_seconds", "max_pages", "request_delay_seconds"):
+        value = c[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{name} must be positive")
+    if not isinstance(c["max_pages"], int):
+        raise ValueError("max_pages must be an integer")
+    if c["initial_mode"] not in ("send", "skip"):
+        raise ValueError("initial_mode must be send or skip")
+    if c["translation"]["provider"] not in ("google_web", "google_cloud"):
+        raise ValueError("Unknown translation provider")
+    c["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN") or c["telegram"]["bot_token"]
+    c["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID") or str(c["telegram"]["chat_id"])
+    c["translation"]["google_api_key"] = os.getenv("GOOGLE_TRANSLATE_API_KEY") or c["translation"].get("google_api_key", "")
+    c["database"] = str(path.parent / c.get("database", "state.sqlite3"))
+    return c
+
+
+def request(session, method, url, **kwargs):
+    # Never expose request URLs or exception strings: URLs may contain tokens.
+    try:
+        response = session.request(method, url, timeout=(10, 45), **kwargs)
+    except requests.RequestException:
+        raise ServiceError("Network request failed or timed out") from None
+    if response.status_code != 200:
+        raise ServiceError(f"Remote service returned HTTP {response.status_code}")
+    return response
+
+
+def parse_search(source, url):
+    soup = BeautifulSoup(source, "html.parser")
+    items = {}
+    for a in soup.select('a[href]'):
+        href = urljoin(url, a["href"])
+        p = urlsplit(href)
+        match = re.fullmatch(r"/recommerce/forsale/item/(\d+)/?", p.path)
+        if p.netloc == "www.finn.no" and match:
+            ident = match.group(1)
+            items[ident] = f"https://www.finn.no/recommerce/forsale/item/{ident}"
+    if not items:
+        # Do not mistake a challenge page / changed markup for a valid baseline.
+        raise ServiceError("No listing links found; empty search, blocked page, or changed FINN markup")
+    next_link = soup.select_one('a[rel~="next"]')
+    next_url = finn_url(urljoin(url, next_link["href"])) if next_link else None
+    return items, next_url
+
+
+def parse_detail(source):
+    soup = BeautifulSoup(source, "html.parser")
+    title = soup.select_one('[data-testid="object-title"]')
+    desc = soup.select_one('[data-testid="description"] .whitespace-pre-wrap')
+    if title is None or desc is None:
+        raise ServiceError("Listing title/description missing; removed listing or changed FINN markup")
+    # FINN renders its page inside declarative shadow-DOM <template> elements.
+    # BeautifulSoup excludes TemplateString from get_text() by default.
+    types = (NavigableString, TemplateString)
+    title_text = title.get_text(" ", strip=True, types=types)
+    desc_text = desc.get_text("\n", strip=True, types=types)
+    if not title_text or not desc_text:
+        raise ServiceError("Listing title/description is empty")
+    return title_text, desc_text
+
+
+def chunks(text, limit=2500):
+    # 2500 code points also stay below Google's web input limit.
+    while text:
+        cut = min(len(text), limit)
+        if cut < len(text):
+            space = text.rfind(" ", 0, cut)
+            if space > limit // 2:
+                cut = space + 1
+        yield text[:cut]
+        text = text[cut:]
+
+
+class Bot:
+    def __init__(self, config, db):
+        self.c, self.db = config, db
+        self.session = requests.Session()
+        self.session.headers["User-Agent"] = "FINN-Alert/1.0 (personal search notifier)"
+
+    def fetch(self, url):
+        STOP.wait(self.c["request_delay_seconds"])
+        response = request(self.session, "GET", finn_url(url))
+        return response.content
+
+    def discover(self):
+        url = self.c["search_url"]
+        found = {}
+        for _ in range(self.c["max_pages"]):
+            items, next_url = parse_search(self.fetch(url), url)
+            found.update(items)
+            if not next_url:
+                break
+            url = next_url
+        else:
+            if next_url:
+                LOG.warning("Scan reached max_pages; older results outside this window are not monitored")
+        return found
+
+    def translate(self, text):
+        translated = []
+        for part in chunks(text):
+            STOP.wait(self.c["request_delay_seconds"])
+            if self.c["translation"]["provider"] == "google_cloud":
+                key = self.c["translation"]["google_api_key"]
+                if not key:
+                    raise ServiceError("google_cloud requires google_api_key")
+                r = request(self.session, "POST", "https://translation.googleapis.com/language/translate/v2",
+                            headers={"X-Goog-Api-Key": key},
+                            json={"q": part, "target": "en", "format": "text"})
+                try:
+                    value = r.json()["data"]["translations"][0]["translatedText"]
+                except (ValueError, KeyError, IndexError, TypeError):
+                    raise ServiceError("Unexpected Google Cloud response") from None
+            else:
+                r = request(self.session, "GET", "https://translate.google.com/m",
+                            params={"sl": "auto", "tl": "en", "q": part})
+                node = BeautifulSoup(r.content, "html.parser").select_one(".result-container")
+                if node is None:
+                    raise ServiceError("Google web translation unavailable; retry later or use google_cloud")
+                value = node.get_text(" ", strip=True)
+            if not value:
+                raise ServiceError("Translation was empty")
+            translated.append(html.unescape(value))
+        return "\n".join(translated)
+
+    def send(self, text):
+        token = self.c["telegram"]["bot_token"]
+        # No automatic POST retry: a network timeout might follow a successful send.
+        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": self.c["telegram"]["chat_id"], "text": text})
+        try:
+            ok = r.json().get("ok")
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ServiceError("Telegram rejected the message")
+
+    def enqueue(self, items):
+        # Baselines belong to a search, so changing filters starts a new baseline.
+        p = urlsplit(self.c["search_url"])
+        normalized = urlunsplit((p.scheme, p.netloc, p.path, urlencode(sorted(
+            (k, v) for k, v in parse_qsl(p.query) if not k.startswith("utm_") and k != "page")), ""))
+        key = "baseline:" + hashlib.sha256(normalized.encode()).hexdigest()
+        first = not self.db.execute("SELECT 1 FROM meta WHERE key=?", (key,)).fetchone()
+        state = "skipped" if first and self.c["initial_mode"] == "skip" else "pending"
+        with self.db:
+            for ident, url in reversed(list(items.items())):
+                self.db.execute("INSERT OR IGNORE INTO ads(id,url,status) VALUES(?,?,?)", (ident, url, state))
+            self.db.execute("INSERT OR IGNORE INTO meta(key) VALUES(?)", (key,))
+        LOG.info("Discovered %s listings; initial_mode=%s", len(items), self.c["initial_mode"])
+
+    def deliver(self):
+        rows = self.db.execute("SELECT id,url,messages,next_part FROM ads WHERE status='pending' ORDER BY rowid").fetchall()
+        failed = False
+        for ident, url, stored, next_part in rows:
+            if STOP.is_set():
+                break
+            try:
+                if stored is None:
+                    source = self.fetch(url)
+                    try:
+                        title, desc = parse_detail(source)
+                    except ServiceError:
+                        LOG.error("Listing %s has no readable description; retained for a later poll", ident)
+                        failed = True
+                        continue
+                    english = self.translate(title + "\n\n" + desc)
+                    # <= 3600 UTF-16 units including link, below Telegram's limit.
+                    messages = [f"FINN | English\n{url}\n\n{p}" for p in chunks(english, 1700)]
+                    with self.db:
+                        self.db.execute("UPDATE ads SET messages=? WHERE id=?", (json.dumps(messages), ident))
+                else:
+                    messages = json.loads(stored)
+                for i in range(next_part, len(messages)):
+                    if STOP.is_set():
+                        return False
+                    self.send(messages[i])
+                    with self.db:
+                        self.db.execute("UPDATE ads SET next_part=? WHERE id=?", (i + 1, ident))
+                    STOP.wait(max(3, self.c["request_delay_seconds"]))
+                with self.db:
+                    self.db.execute("UPDATE ads SET status='sent' WHERE id=?", (ident,))
+                LOG.info("Sent listing %s", ident)
+            except ServiceError as exc:
+                LOG.error("Listing %s remains queued: %s", ident, exc)
+                failed = True
+                # Avoid hammering Telegram/Google during an outage or rate limit.
+                break
+        return not failed
+
+
+def database(path):
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS ads (
+            id TEXT PRIMARY KEY, url TEXT NOT NULL, status TEXT NOT NULL,
+            messages TEXT, next_part INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY);
+    """)
+    return db
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=Path("config.json"))
+    parser.add_argument("--once", action="store_true", help="Run one poll, including delivery")
+    parser.add_argument("--preview", action="store_true", help="Print one translated listing; no Telegram or database writes")
+    args = parser.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, lambda *_: STOP.set())
+    try:
+        c = load_config(args.config.resolve())
+        if args.preview:
+            bot = Bot(c, None)
+            items, _ = parse_search(bot.fetch(c["search_url"]), c["search_url"])
+            url = next(iter(items.values()))
+            title, desc = parse_detail(bot.fetch(url))
+            print(url + "\n\n" + bot.translate(title + "\n\n" + desc))
+            return 0
+        if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
+            raise ValueError("Set a valid Telegram bot token in config or TELEGRAM_BOT_TOKEN")
+        if "your_channel" in c["telegram"]["chat_id"] or not c["telegram"]["chat_id"]:
+            raise ValueError("Set telegram.chat_id")
+        # Linux flock prevents two processes from using the same delivery queue.
+        with open(c["database"] + ".lock", "a") as lock:
+            if os.name == "posix":
+                import fcntl
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise ServiceError("Another instance is using this database") from None
+            db = database(c["database"])
+            bot = Bot(c, db)
+            try:
+                while not STOP.is_set():
+                    start = time.monotonic()
+                    ok = True
+                    try:
+                        bot.enqueue(bot.discover())
+                    except ServiceError as exc:
+                        LOG.error("Search failed: %s", exc)
+                        ok = False
+                    ok = bot.deliver() and ok
+                    if args.once:
+                        return 0 if ok else 1
+                    STOP.wait(max(1, c["poll_interval_seconds"] - (time.monotonic() - start)))
+            finally:
+                db.close()
+        return 0
+    except (ServiceError, ValueError, KeyError, OSError) as exc:
+        # Avoid printing config values, credentials, or request URLs.
+        LOG.error("Startup/run failed (%s). Check configuration, connectivity and file permissions.", type(exc).__name__)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
