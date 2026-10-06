@@ -117,11 +117,61 @@ def chunks(text, limit=2500):
         text = text[cut:]
 
 
+def parse_metadata(source):
+    soup = BeautifulSoup(source, "html.parser")
+    types = (NavigableString, TemplateString)
+    address = soup.select_one('[data-testid="object-address"]')
+    info = soup.select_one('[data-testid="object-info"]')
+    metadata = {"address": address.get_text(" ", strip=True, types=types) if address else ""}
+    text = info.get_text(" ", strip=True, types=types) if info else ""
+    for label, key in (("Sist endret", "updated"), ("Publisert", "published")):
+        match = re.search(label + r"\s*:\s*(\d{1,2}\.\d{1,2}\.\d{4})\s+kl\.\s*(\d{1,2}:\d{2})", text)
+        if match:
+            try:
+                stamp = datetime.strptime(" ".join(match.groups()), "%d.%m.%Y %H:%M")
+            except ValueError:
+                continue
+            metadata[key] = stamp.strftime("%Y-%m-%d %H:%M") + " (FINN local time)"
+    link = soup.select_one('[data-testid="map-link"][href]')
+    if link:
+        url = urljoin("https://www.finn.no", link["href"])
+        if urlsplit(url).scheme == "https" and urlsplit(url).netloc == "www.finn.no":
+            metadata["map_url"] = url
+    return metadata
+
+
+def rich_messages(url, body, heading, metadata):
+    header = (f"<b>{html.escape(heading)}</b>\n"
+              f'<a href="{html.escape(url, quote=True)}">Open FINN listing</a>\n'
+              f"Published: {html.escape(metadata.get('published', 'Not provided by FINN'))}\n")
+    if metadata.get("updated"):
+        header += "Last updated: " + html.escape(metadata["updated"]) + "\n"
+    address = metadata.get("address", "")
+    map_url = metadata.get("map_url")
+    if address:
+        label = html.escape(address[:300])
+        header += (f'Area: <a href="{html.escape(map_url, quote=True)}">{label}</a>\n' if map_url else f"Area: {label}\n")
+    buttons = [[{"text": "Copy listing link", "copy_text": {"text": url}}]]
+    if address and len(address) <= 256:
+        buttons[0].append({"text": "Copy address", "copy_text": {"text": address}})
+    if map_url:
+        buttons.append([{"text": "Open map", "url": map_url}])
+    messages = []
+    for part in chunks(body, 1500):
+        rows = [list(row) for row in buttons]
+        if len(part) <= 256:
+            rows.append([{"text": "Copy text", "copy_text": {"text": part}}])
+        messages.append({"text": header + "\n<pre>" + html.escape(part) + "</pre>",
+                         "parse_mode": "HTML", "reply_markup": {"inline_keyboard": rows}})
+    return messages
+
+
 class Bot:
     def __init__(self, config, db):
         self.c, self.db = config, db
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "FINN-Alert/1.0 (personal search notifier)"
+        self.detail_metadata = {}
 
     def fetch(self, url):
         STOP.wait(self.c["request_delay_seconds"])
@@ -186,7 +236,9 @@ class Bot:
             self.report_fetch_error("Listing details", url, exc)
             raise ServiceError(str(exc)) from None
         try:
-            return parse_detail(source)
+            detail = parse_detail(source)
+            self.detail_metadata[url] = parse_metadata(source)
+            return detail
         except ServiceError as exc:
             self.report_fetch_error("Listing details", url, exc)
             raise ListingParseError(str(exc)) from None
@@ -221,8 +273,9 @@ class Bot:
     def send(self, text):
         token = self.c["telegram"]["bot_token"]
         # No automatic POST retry: a network timeout might follow a successful send.
-        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={"chat_id": self.c["telegram"]["chat_id"], "text": text})
+        payload = dict(text) if isinstance(text, dict) else {"text": text}
+        payload["chat_id"] = self.c["telegram"]["chat_id"]
+        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
         try:
             ok = r.json().get("ok")
         except ValueError:
@@ -239,7 +292,7 @@ class Bot:
             LOG.warning("Translation failed; sending original listing: %s", exc)
             body = original
             heading = "FINN | Translation failed. Original text follows."
-        return [f"{heading}\n{url}\n\n{part}" for part in chunks(body, 1700)]
+        return rich_messages(url, body, heading, self.detail_metadata.pop(url, {}))
 
     def enqueue(self, items):
         # Baselines belong to a search, so changing filters starts a new baseline.
@@ -319,8 +372,8 @@ def main():
             bot = Bot(c, None)
             items, _ = parse_search(bot.fetch(c["search_url"]), c["search_url"])
             url = next(iter(items.values()))
-            title, desc = parse_detail(bot.fetch(url))
-            print("\n\n---\n\n".join(bot.listing_messages(url, title, desc)))
+            title, desc = bot.listing_detail(url)
+            print(json.dumps(bot.listing_messages(url, title, desc), ensure_ascii=False, indent=2))
             return 0
         if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
             raise ValueError("Set a valid Telegram bot token in config or TELEGRAM_BOT_TOKEN")

@@ -3,7 +3,7 @@ import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
-from finn_alert import Bot, ServiceError, STOP, chunks, database, parse_detail, parse_search
+from finn_alert import Bot, ServiceError, STOP, chunks, database, parse_detail, parse_search, parse_metadata, rich_messages
 
 URL = "https://www.finn.no/recommerce/forsale/search?trade_type=2"
 ITEM = "https://www.finn.no/recommerce/forsale/item/123"
@@ -65,7 +65,7 @@ class Tests(unittest.TestCase):
         self.bot.translate = Mock(side_effect=ServiceError('HTTP 429'))
         self.bot.send = Mock(side_effect=lambda _: STOP.set())
         self.assertTrue(self.bot.deliver())
-        message = self.bot.send.call_args.args[0]
+        message = self.bot.send.call_args.args[0]['text']
         self.assertIn('Translation failed. Original text follows.', message)
         self.assertIn('Original description', message)
         self.assertIn(ITEM, message)
@@ -73,8 +73,10 @@ class Tests(unittest.TestCase):
 
     def test_successful_translation_uses_english(self):
         self.bot.translate = Mock(return_value='English title and description')
-        self.assertEqual(self.bot.listing_messages(ITEM, 'Original', 'Description'),
-                         [f'FINN | English\n{ITEM}\n\nEnglish title and description'])
+        message = self.bot.listing_messages(ITEM, 'Original', 'Description')[0]
+        self.assertIn('FINN | English', message['text'])
+        self.assertIn('<pre>English title and description</pre>', message['text'])
+        self.assertEqual(message['parse_mode'], 'HTML')
 
     def test_fallback_is_cached_when_telegram_fails(self):
         self.bot.enqueue({'123': ITEM})
@@ -145,6 +147,47 @@ class Tests(unittest.TestCase):
         preview.send = Mock()
         preview.report_fetch_error('Search page', URL, ServiceError('HTTP 429'))
         preview.send.assert_not_called()
+
+    def test_metadata_preserves_updated_vs_published(self):
+        source = '<template><section data-testid="object-info">Sist endret: 4.10.2026 kl. 14:56</section><a data-testid="map-link" href="/map?postalCode=5056"><span data-testid="object-address">5056 Bergen</span></a></template>'
+        metadata = parse_metadata(source)
+        self.assertEqual(metadata['address'], '5056 Bergen')
+        self.assertIn('2026-10-04 14:56', metadata['updated'])
+        self.assertNotIn('published', metadata)
+        self.assertEqual(metadata['map_url'], 'https://www.finn.no/map?postalCode=5056')
+
+    def test_metadata_missing_or_invalid(self):
+        self.assertEqual(parse_metadata('<p>No metadata</p>'), {'address': ''})
+        self.assertNotIn('updated', parse_metadata('<section data-testid="object-info">Sist endret: 99.10.2026 kl. 14:56</section>'))
+        self.assertNotIn('map_url', parse_metadata('<a data-testid="map-link" href="javascript:alert(1)">Map</a>'))
+
+    def test_rich_text_escaping_and_copy_limits(self):
+        body = '<script>& " ' + '\U0001f600' * 3000
+        messages = rich_messages(ITEM, body, 'FINN | English', {'address': '5056 Bergen', 'map_url': 'https://www.finn.no/map?a=1&b=2'})
+        from bs4 import BeautifulSoup
+        reconstructed = ''
+        for message in messages:
+            soup = BeautifulSoup(message['text'], 'html.parser')
+            reconstructed += soup.pre.get_text()
+            self.assertFalse(soup.select('script'))
+            self.assertLess(len(soup.get_text().encode('utf-16-le')) // 2, 4096)
+            for row in message['reply_markup']['inline_keyboard']:
+                for button in row:
+                    if 'copy_text' in button:
+                        self.assertLessEqual(len(button['copy_text']['text']), 256)
+        self.assertEqual(reconstructed, body)
+
+    def test_send_supports_legacy_and_rich_queue_entries(self):
+        self.config['telegram'] = {'bot_token': '123:fake', 'chat_id': '-123'}
+        response = Mock()
+        response.json.return_value = {'ok': True}
+        with patch('finn_alert.request', return_value=response) as call:
+            self.bot.send('Legacy queued text')
+            self.assertEqual(call.call_args.kwargs['json']['text'], 'Legacy queued text')
+            message = rich_messages(ITEM, 'Short text', 'FINN', {})[0]
+            self.bot.send(message)
+            self.assertEqual(call.call_args.kwargs['json']['parse_mode'], 'HTML')
+            self.assertNotIn('chat_id', message)
 
 
 if __name__ == "__main__":
