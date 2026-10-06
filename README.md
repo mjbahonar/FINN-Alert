@@ -6,7 +6,40 @@ Monitor a FINN search and send new listings to a Telegram group or channel. Noti
 
 Requires Python 3.10+. Ubuntu 22.04 / 24.04 supported. Polling defaults to five minutes. SQLite preserves delivery state across restarts; long descriptions are split into messages.
 
-## Install on Ubuntu
+## Quick setup with WinSCP and a terminal kept open
+
+1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload just these three files: `finn_alert.py`, `requirements.txt`, and your configured `config.json` (containing your Telegram token and destination).
+2. Open a terminal on the server and run the following one-time installation:
+
+```bash
+cd ~/finn-alert
+sudo apt update
+sudo apt install -y python3 python3-venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+chmod 600 config.json
+```
+
+3. Start the bot directly:
+
+```bash
+python3 finn_alert.py
+```
+
+Keep this terminal/session running. The bot polls automatically at the interval in `config.json`; there is no need to rerun it for each poll. Press `Ctrl+C` to stop. This direct method does not automatically restart after the process exits or the server reboots.
+
+For later runs from a new terminal:
+
+```bash
+cd ~/finn-alert
+source .venv/bin/activate
+python3 finn_alert.py
+```
+
+Before the first run, set `"initial_mode": "skip"` in `config.json` if you want to baseline existing listings without sending them. Use `"send"` to send existing listings too. On a translation error, the original listing is sent with an English warning. Preserve the generated `state.sqlite3` file to retain delivery history. Restart the program after changing configuration. Run only one instance.
+
+## Install on Ubuntu with systemd (alternative)
 
 Copy the project to `/opt/finn-alert`, then run:
 
