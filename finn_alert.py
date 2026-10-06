@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import html
 import json
@@ -27,6 +28,10 @@ class ServiceError(Exception):
     pass
 
 
+class ListingParseError(ServiceError):
+    pass
+
+
 def finn_url(url):
     p = urlsplit(url)
     if p.scheme != "https" or p.netloc != "www.finn.no":
@@ -36,8 +41,9 @@ def finn_url(url):
 
 def load_config(path):
     c = json.loads(path.read_text(encoding="utf-8-sig"))
+    c.setdefault("error_alert_interval_seconds", 1800)
     finn_url(c["search_url"])
-    for name in ("poll_interval_seconds", "max_pages", "request_delay_seconds"):
+    for name in ("poll_interval_seconds", "max_pages", "request_delay_seconds", "error_alert_interval_seconds"):
         value = c[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
             raise ValueError(f"{name} must be positive")
@@ -126,7 +132,11 @@ class Bot:
         url = self.c["search_url"]
         found = {}
         for _ in range(self.c["max_pages"]):
-            items, next_url = parse_search(self.fetch(url), url)
+            try:
+                items, next_url = parse_search(self.fetch(url), url)
+            except (ServiceError, ValueError) as exc:
+                self.report_fetch_error("Search page", url, exc)
+                raise ServiceError(str(exc)) from None
             found.update(items)
             if not next_url:
                 break
@@ -135,6 +145,51 @@ class Bot:
             if next_url:
                 LOG.warning("Scan reached max_pages; older results outside this window are not monitored")
         return found
+
+    def report_fetch_error(self, stage, url, error):
+        # Preview/connectivity checks have no database and must never send messages.
+        if self.db is None:
+            return
+        detail = str(error) if isinstance(error, ServiceError) else type(error).__name__
+        for secret in (self.c.get("telegram", {}).get("bot_token"),
+                       self.c.get("translation", {}).get("google_api_key")):
+            if secret:
+                detail = detail.replace(secret, "[REDACTED]")
+        detail = re.sub(r"https?://\S+", "[URL omitted]", detail)[:500]
+        # Group identical errors across listing IDs to avoid one alert per failed ad.
+        key = hashlib.sha256((stage + ":" + detail).encode()).hexdigest()
+        now = time.time()
+        row = self.db.execute("SELECT sent_at FROM error_alerts WHERE key=?", (key,)).fetchone()
+        interval = self.c.get("error_alert_interval_seconds", 1800)
+        if row and now - row[0] < interval:
+            return
+        p = urlsplit(url)
+        link = f"https://www.finn.no{p.path}" if p.netloc == "www.finn.no" else "FINN"
+        message = ("FINN Alert | Fetch error\n"
+                   f"Time (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
+                   f"Stage: {stage}\nError: {detail}\nPage: {link}\n\n"
+                   "The failed fetch will be retried on a later poll. "
+                   f"Identical alerts are limited to once every {interval:g} seconds.")
+        try:
+            self.send(message)
+        except ServiceError:
+            # Do not recursively alert on an alert-delivery failure.
+            LOG.error("Could not send FINN fetch-error alert to Telegram; will retry if the fetch fails again")
+            return
+        with self.db:
+            self.db.execute("INSERT OR REPLACE INTO error_alerts(key,sent_at) VALUES(?,?)", (key, now))
+
+    def listing_detail(self, url):
+        try:
+            source = self.fetch(url)
+        except (ServiceError, ValueError) as exc:
+            self.report_fetch_error("Listing details", url, exc)
+            raise ServiceError(str(exc)) from None
+        try:
+            return parse_detail(source)
+        except ServiceError as exc:
+            self.report_fetch_error("Listing details", url, exc)
+            raise ListingParseError(str(exc)) from None
 
     def translate(self, text):
         translated = []
@@ -208,10 +263,9 @@ class Bot:
                 break
             try:
                 if stored is None:
-                    source = self.fetch(url)
                     try:
-                        title, desc = parse_detail(source)
-                    except ServiceError:
+                        title, desc = self.listing_detail(url)
+                    except ListingParseError:
                         LOG.error("Listing %s has no readable description; retained for a later poll", ident)
                         failed = True
                         continue
@@ -245,6 +299,7 @@ def database(path):
             id TEXT PRIMARY KEY, url TEXT NOT NULL, status TEXT NOT NULL,
             messages TEXT, next_part INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS error_alerts (key TEXT PRIMARY KEY, sent_at REAL NOT NULL);
     """)
     return db
 

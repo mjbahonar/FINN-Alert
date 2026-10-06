@@ -31,6 +31,7 @@ Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo 
 |---|---|
 | `search_url` | FINN URL with location and other filters |
 | `poll_interval_seconds` | Interval between poll starts; default `300` |
+| `error_alert_interval_seconds` | Minimum interval for repeated identical FINN error alerts; default `1800` (30 minutes) |
 | `max_pages` | Maximum search pages per poll; default `3` |
 | `request_delay_seconds` | Request delay; default `2` seconds |
 | `initial_mode` | `send`: send existing results on first run; `skip`: baseline existing results and send only newly discovered listings |
@@ -186,6 +187,10 @@ sudo journalctl -u finn-alert -f
 Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: `sudo systemctl stop finn-alert`.
 
 ## Delivery behavior and limitations
+
+FINN search and listing-detail fetch/parsing failures send an English `FINN Alert | Fetch error` notification to the same configured Telegram destination. It includes UTC time, the failing stage, a safe error description (such as HTTP 403/429 or a network timeout), and the FINN page path. Query strings, tokens, and raw network exception details are omitted. Identical errors in the same stage, including errors affecting different listings, are grouped and reported at most once per 30 minutes by default. A different error is reported immediately. The cooldown is stored in SQLite and survives restarts. Existing configurations automatically use the default; add `error_alert_interval_seconds` to customize it.
+
+Preview and connectivity checks do not send these alerts. If Telegram or the entire network is unavailable, the alert cannot be delivered: the failure is logged locally, and the alert is attempted again if the FINN failure recurs. Missed alerts are not separately queued. Translation failures continue to use the original-listing fallback below.
 
 - All program-generated messages and documentation are English. When translation fails, the seller's original text remains in its original language, with an English warning.
 - Successfully delivered fallback listings are marked sent and are not later resent as translations. Telegram failures retain prepared messages for retry without repeating translation.

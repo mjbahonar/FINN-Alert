@@ -1,7 +1,7 @@
 import json
 import sqlite3
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from finn_alert import Bot, ServiceError, STOP, chunks, database, parse_detail, parse_search
 
@@ -94,6 +94,57 @@ class Tests(unittest.TestCase):
         for part in parts:
             message = f"FINN | English\n{ITEM}\n\n{part}"
             self.assertLess(len(message.encode("utf-16-le")) // 2, 4096)
+
+    def test_search_failure_alert_and_restart_cooldown(self):
+        self.config['max_pages'] = 1
+        self.bot.fetch = Mock(side_effect=ServiceError('Remote service returned HTTP 429'))
+        self.bot.send = Mock()
+        with patch('finn_alert.time.time', return_value=1000):
+            with self.assertRaises(ServiceError):
+                self.bot.discover()
+        self.assertIn('Stage: Search page', self.bot.send.call_args.args[0])
+        self.assertIn('HTTP 429', self.bot.send.call_args.args[0])
+        restarted = Bot(self.config, self.db)
+        restarted.send = Mock()
+        with patch('finn_alert.time.time', return_value=1100):
+            restarted.report_fetch_error('Search page', URL, ServiceError('Remote service returned HTTP 429'))
+        restarted.send.assert_not_called()
+        with patch('finn_alert.time.time', return_value=2800):
+            restarted.report_fetch_error('Search page', URL, ServiceError('Remote service returned HTTP 429'))
+        restarted.send.assert_called_once()
+
+    def test_listing_fetch_and_parse_errors_notify(self):
+        self.bot.send = Mock()
+        self.bot.fetch = Mock(side_effect=ServiceError('Network request failed or timed out'))
+        with self.assertRaises(ServiceError):
+            self.bot.listing_detail(ITEM)
+        self.bot.fetch = Mock(return_value='<h1>Removed</h1>')
+        with self.assertRaises(ServiceError):
+            self.bot.listing_detail(ITEM)
+        self.assertEqual(self.bot.send.call_count, 2)
+        self.assertIn('Stage: Listing details', self.bot.send.call_args.args[0])
+
+    def test_failed_alert_delivery_can_retry_without_recursion(self):
+        self.bot.send = Mock(side_effect=ServiceError('Telegram unavailable'))
+        self.bot.report_fetch_error('Search page', URL, ServiceError('HTTP 403'))
+        self.bot.send.assert_called_once()
+        self.assertEqual(self.db.execute('SELECT count(*) FROM error_alerts').fetchone()[0], 0)
+        self.bot.send = Mock()
+        self.bot.report_fetch_error('Search page', URL, ServiceError('HTTP 403'))
+        self.bot.send.assert_called_once()
+
+    def test_alert_redacts_secrets_and_preview_does_not_send(self):
+        self.config['telegram'] = {'bot_token': 'secret-token'}
+        self.config['translation'] = {'google_api_key': 'secret-key'}
+        self.bot.send = Mock()
+        self.bot.report_fetch_error('Search page', URL + '&private=value', ServiceError('secret-token secret-key https://example.com/private'))
+        message = self.bot.send.call_args.args[0]
+        for secret in ('secret-token', 'secret-key', 'private=value', 'example.com'):
+            self.assertNotIn(secret, message)
+        preview = Bot(self.config, None)
+        preview.send = Mock()
+        preview.report_fetch_error('Search page', URL, ServiceError('HTTP 429'))
+        preview.send.assert_not_called()
 
 
 if __name__ == "__main__":
