@@ -8,5 +8,6 @@
   "translation": {
     "provider": "argos",
     "model_path": "models/nb-en"
-  }
+  },
+  "send_photos": true
 }

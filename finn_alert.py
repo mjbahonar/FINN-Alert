@@ -148,6 +148,54 @@ def parse_metadata(source):
     return metadata
 
 
+def parse_photos(source, listing_url):
+    """Extract ordered gallery photos only, excluding thumbnails and related ads."""
+    soup = BeautifulSoup(source, "html.parser")
+    nodes = [node for node in soup.select('img[id^="image-"], img[data-testid^="image-"]')
+             if re.fullmatch(r"image-\d+", node.get("id", "") or node.get("data-testid", ""))]
+    if not nodes:
+        nodes = soup.select('img[alt="Miniatyrgalleribilde"]')
+    candidates = []
+    for node in nodes:
+        value = node.get("data-src") or node.get("src")
+        if not value:
+            value = (node.get("data-srcset") or node.get("srcset") or "").split(",")[0].strip().split(" ")[0]
+        if value:
+            candidates.append(value)
+    if not candidates:
+        candidates = [node.get("content", "") for node in soup.select('meta[property="og:image"]')]
+    photos, seen = [], set()
+    listing_id = urlsplit(listing_url).path.rstrip("/").split("/")[-1]
+    for value in candidates:
+        parsed = urlsplit(urljoin(listing_url, value))
+        if parsed.scheme != "https" or parsed.netloc != "images.finncdn.no":
+            continue
+        match = re.fullmatch(r"/dynamic/[^/]+/(.+)", parsed.path)
+        if not match:
+            continue
+        image_path = match.group(1).lstrip("/")
+        if image_path.startswith("item/") and not image_path.startswith("item/" + listing_id + "/"):
+            continue
+        if image_path not in seen:
+            seen.add(image_path)
+            photos.append("https://images.finncdn.no/dynamic/960w/" + image_path)
+    return photos
+
+
+def photo_messages(url, photos):
+    messages = []
+    for offset in range(0, len(photos), 10):
+        group = photos[offset:offset + 10]
+        caption = f"FINN | Photos {offset + 1}-{offset + len(group)} of {len(photos)}\n{url}"
+        if len(group) == 1:
+            messages.append({"_method": "sendPhoto", "photo": group[0], "caption": caption})
+        else:
+            media = [{"type": "photo", "media": photo} for photo in group]
+            media[0]["caption"] = caption
+            messages.append({"_method": "sendMediaGroup", "media": media})
+    return messages
+
+
 def rich_messages(url, body, heading, metadata, original=None):
     header = (f"<b>{html.escape(heading)}</b>\n"
               f'<a href="{html.escape(url, quote=True)}">Open FINN listing</a>\n'
@@ -257,6 +305,8 @@ class Bot:
         try:
             detail = parse_detail(source)
             self.detail_metadata[url] = parse_metadata(source)
+            if self.c.get("send_photos", True):
+                self.detail_metadata[url]["photos"] = parse_photos(source, url)
             return detail
         except ServiceError as exc:
             self.report_fetch_error("Listing details", url, exc)
@@ -304,8 +354,11 @@ class Bot:
         token = self.c["telegram"]["bot_token"]
         # No automatic POST retry: a network timeout might follow a successful send.
         payload = dict(text) if isinstance(text, dict) else {"text": text}
+        method = payload.pop("_method", "sendMessage")
+        if method not in ("sendMessage", "sendPhoto", "sendMediaGroup"):
+            raise ServiceError("Unknown Telegram delivery method")
         payload["chat_id"] = self.c["telegram"]["chat_id"]
-        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
+        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/{method}", json=payload)
         try:
             ok = r.json().get("ok")
         except ValueError:
@@ -315,16 +368,17 @@ class Bot:
 
     def listing_messages(self, url, title, description):
         original = title + "\n\n" + description
+        metadata = self.detail_metadata.pop(url, {})
+        photos = photo_messages(url, metadata.pop("photos", []))
         try:
             body = self.translate(original)
             heading = "FINN | English"
-            metadata = self.detail_metadata.pop(url, {})
-            return rich_messages(url, body, heading, metadata, original=original)
+            return photos + rich_messages(url, body, heading, metadata, original=original)
         except ServiceError as exc:
             LOG.warning("Translation failed; sending original listing: %s", exc)
             body = original
             heading = "FINN | Translation failed. Original text follows."
-        return rich_messages(url, body, heading, self.detail_metadata.pop(url, {}))
+        return photos + rich_messages(url, body, heading, metadata)
 
     def enqueue(self, items):
         # Baselines belong to a search, so changing filters starts a new baseline.

@@ -1,6 +1,6 @@
 # FINN Alert
 
-FINN Alert is a program that takes a FINN search link, a checking interval, and a Telegram group or channel destination, then sends notifications for new listings matching that search. Notifications contain the listing link, original title and full description under `Original text:`, and their English translation under `Translated to English:`. Both sections use separate copyable code blocks. If translation fails, the original text is sent with this English notice:
+FINN Alert is a program that takes a FINN search link, a checking interval, and a Telegram group or channel destination, then sends notifications for new listings matching that search. Notifications contain the listing link, original title and full description under `Original text:`, and their English translation under `Translated to English:`. Both sections use separate copyable code blocks. Listing photos are sent first as Telegram albums, followed by the original and translated text. If translation fails, the original text is sent with this English notice:
 
 > Translation failed. Original text follows.
 
@@ -72,6 +72,7 @@ Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo 
 | `request_delay_seconds` | Request delay; default `2` seconds |
 | `initial_mode` | `send`: send existing results on first run; `skip`: baseline existing results and send only newly discovered listings |
 | `database` | SQLite path relative to the configuration file |
+| `send_photos` | Send gallery photos before text; defaults to `true`; set `false` for text only |
 | `TELEGRAM_BOT_TOKEN` (`.env`) | Complete BotFather token |
 | `TELEGRAM_CHAT_ID` (`.env`) | Numeric group/private-channel ID or public channel `@username` |
 | `translation.provider` | `argos` (default, offline nb to en), `google_web`, or `google_cloud` |
@@ -248,6 +249,18 @@ sudo journalctl -u finn-alert -f
 ```
 
 Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: `sudo systemctl stop finn-alert`.
+
+## Listing photo albums
+
+All gallery photos exposed in a listing page are extracted in page order. Duplicate thumbnail versions, profile images and unrelated recommended listings are excluded. Photos are sent before the original text and English translation. Tap a photo in Telegram to browse the album.
+
+Each album contains up to 10 photos. Larger galleries are split across multiple albums; a remaining single photo uses `sendPhoto`. Every album or single photo includes the FINN link in its caption. Listings without extractable photos still send text normally. Set `"send_photos": false` in config.json to disable gallery delivery.
+
+Telegram retrieves 960-pixel-wide image URLs directly from FINN's image CDN; the bot does not store photos on the server. Photo URL availability and Telegram's file limits still apply. If a photo or album request fails, its listing remains queued and retries on a later poll. Previously acknowledged albums are checkpointed and skipped on retry. A failed album delays that listing's following text; delivery resumes after the album succeeds. A network timeout or crash after Telegram accepts an album but before checkpointing may duplicate that album.
+
+Prepared queue entries from older versions retain their existing format and are not rewritten. Previously sent listings are not resent solely to add photos. New or not-yet-prepared listings use the new photo format. The SQLite schema and delivery history are preserved.
+
+References: [Telegram albums](https://core.telegram.org/bots/api#sendmediagroup), [single photos](https://core.telegram.org/bots/api#sendphoto).
 
 ## Delivery behavior and limitations
 
