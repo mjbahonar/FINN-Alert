@@ -7,3 +7,4 @@ __pycache__/
 *.sqlite3*
 finn-*-sample.html
 finn-sample.html
+models/

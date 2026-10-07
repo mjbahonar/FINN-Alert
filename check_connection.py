@@ -46,7 +46,7 @@ def main():
         print('Listing count: ' + str(len(items)), flush=True)
         detail = check('FINN listing description', lambda: parse_detail(bot.fetch(next(iter(items.values())))))
     text = '\n\n'.join(detail) if detail else 'Hei verden'
-    check('Google translation (' + config['translation']['provider'] + ')', lambda: bot.translate(text))
+    check('Translation (' + config['translation']['provider'] + ')', lambda: bot.translate(text))
     return 1 if failed else 0
 
 

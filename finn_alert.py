@@ -1,4 +1,4 @@
-"""FINN search -> durable SQLite queue -> Google translation -> Telegram."""
+"""FINN search -> durable SQLite queue -> offline/Google translation -> Telegram."""
 from __future__ import annotations
 
 import argparse
@@ -54,7 +54,7 @@ def load_config(path):
         raise ValueError("max_pages must be an integer")
     if c["initial_mode"] not in ("send", "skip"):
         raise ValueError("initial_mode must be send or skip")
-    if c["translation"]["provider"] not in ("google_web", "google_cloud"):
+    if c["translation"]["provider"] not in ("argos", "google_web", "google_cloud"):
         raise ValueError("Unknown translation provider")
     c["telegram"] = {
         "bot_token": os.getenv("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN") or "",
@@ -62,6 +62,7 @@ def load_config(path):
     }
     c["translation"]["google_api_key"] = (os.getenv("GOOGLE_TRANSLATE_API_KEY")
                                            or env.get("GOOGLE_TRANSLATE_API_KEY") or "")
+    c["translation"]["model_path"] = str(path.parent / c["translation"].get("model_path", "models/nb-en"))
     c["database"] = str(path.parent / c.get("database", "state.sqlite3"))
     return c
 
@@ -178,6 +179,7 @@ class Bot:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "FINN-Alert/1.0 (personal search notifier)"
         self.detail_metadata = {}
+        self.offline_translator = None
 
     def fetch(self, url):
         STOP.wait(self.c["request_delay_seconds"])
@@ -250,6 +252,17 @@ class Bot:
             raise ListingParseError(str(exc)) from None
 
     def translate(self, text):
+        if self.c["translation"]["provider"] == "argos":
+            try:
+                if self.offline_translator is None:
+                    from offline_translation import OfflineTranslator
+                    self.offline_translator = OfflineTranslator(self.c["translation"]["model_path"])
+                value = self.offline_translator.translate(text)
+                if not value.strip():
+                    raise ValueError("Empty translation")
+                return value
+            except Exception:
+                raise ServiceError("Offline translation unavailable; check installed model and dependencies") from None
         translated = []
         for part in chunks(text):
             STOP.wait(self.c["request_delay_seconds"])

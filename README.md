@@ -4,11 +4,11 @@ FINN Alert is a program that takes a FINN search link, a checking interval, and 
 
 > Translation failed. Original text follows.
 
-Requires Python 3.10+. Ubuntu 22.04 / 24.04 supported. Polling defaults to five minutes. SQLite preserves delivery state across restarts; long descriptions are split into messages.
+Requires Python 3.10+. Ubuntu 22.04 / 24.04 on x86_64 supported. Translation defaults to offline Norwegian Bokmal (`nb`) to English using an Argos model with CPU-only CTranslate2 int8 inference; no API key, PyTorch, or Stanza is needed. Polling defaults to five minutes. SQLite preserves delivery state across restarts; long descriptions are split into messages.
 
 ## Quick setup with WinSCP and a terminal kept open
 
-1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload `finn_alert.py`, `requirements.txt`, `config.json`, and your private `.env`. Set the search link and polling interval in `config.json`; set the Telegram token and group/channel destination in `.env` (use `.env.example` as a template).
+1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, `requirements.txt`, `config.json`, and your private `.env`. For connectivity checks also upload `check_connection.py`. Set the search link and polling interval in `config.json`; set the Telegram token and group/channel destination in `.env` (use `.env.example` as a template).
 2. Open a terminal on the server and run the following one-time installation:
 
 ```bash
@@ -17,7 +17,8 @@ sudo apt update
 sudo apt install -y python3 python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --no-cache-dir -r requirements.txt
+python3 setup_translation.py
 chmod 600 .env
 ```
 
@@ -50,7 +51,8 @@ sudo useradd --system --home /opt/finn-alert --shell /usr/sbin/nologin finn-aler
 sudo chown -R finn-alert:finn-alert /opt/finn-alert
 cd /opt/finn-alert
 sudo -u finn-alert python3 -m venv .venv
-sudo -u finn-alert .venv/bin/pip install -r requirements.txt
+sudo -u finn-alert .venv/bin/pip install --no-cache-dir -r requirements.txt
+sudo -u finn-alert .venv/bin/python setup_translation.py
 sudo -u finn-alert cp .env.example .env
 sudo chmod 600 .env
 sudo nano .env
@@ -72,7 +74,8 @@ Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo 
 | `database` | SQLite path relative to the configuration file |
 | `TELEGRAM_BOT_TOKEN` (`.env`) | Complete BotFather token |
 | `TELEGRAM_CHAT_ID` (`.env`) | Numeric group/private-channel ID or public channel `@username` |
-| `translation.provider` | `google_web` or `google_cloud` |
+| `translation.provider` | `argos` (default, offline nb to en), `google_web`, or `google_cloud` |
+| `translation.model_path` | Model directory relative to config.json; default `models/nb-en` |
 | `GOOGLE_TRANSLATE_API_KEY` (`.env`) | API key for `google_cloud` |
 
 The program automatically reads `.env` beside the selected configuration file, including with `--config`. Process environment variables override `.env` values. Keep credentials and the Telegram destination in `.env`; `config.json` is safe to share in Git. Copy `.env.example` to `.env` for a new installation. Restart after editing either file.
@@ -134,7 +137,28 @@ Replace the token. `getMe` returning `"ok":true` confirms authentication; then c
 
 References: [getUpdates](https://core.telegram.org/bots/api#getupdates), [getMe](https://core.telegram.org/bots/api#getme).
 
-## Google translation
+## Offline Norwegian to English translation (default)
+
+Run `python setup_translation.py` once after installing requirements. It downloads the Argos nb-to-en model version 1.9 and installs only its inference files in `models/nb-en`. Setup needs internet; subsequent translation performs no network requests. FINN retrieval and Telegram delivery still need internet. Model files are ignored by Git.
+
+```json
+"translation": {
+  "provider": "argos",
+  "model_path": "models/nb-en"
+}
+```
+
+The model path is relative to the selected configuration file. For a custom location, download with `python setup_translation.py --destination /path/to/model` and set `model_path` accordingly. Only Norwegian Bokmal to English is supported by this offline provider; text in other languages is not detected automatically. Quality is imperfect, especially product names and informal wording. Long text is processed in bounded token segments and message parts; source text is not silently truncated; reaching the output limit triggers the original-text fallback.
+
+The runtime loads CTranslate2 and SentencePiece directly, uses CPU int8 inference and one inference thread, and reuses the model between listings. It does not import the full Argos, Stanza, or PyTorch runtime. No Google key is required. Missing models or translation errors send the original text with an English warning.
+
+English titles and descriptions are sent inside Telegram HTML `<pre>` code blocks, with listing links, dates and map controls outside the blocks. This retains the full text and enables copying in supported clients.
+
+Measured on the Ubuntu 24.04 test server with 961 MiB RAM: direct inference used about 163 MiB peak process RAM and took 0.8-3.9 seconds for three short listings under a 50% CPU quota. These are sample measurements, not limits for larger listings. The earlier complete Argos test installation occupied about 1.6 GiB and exceeded a 320 MiB memory limit; the deployed production environment measured about 230 MiB plus 77 MiB for the model. A live FINN-to-Telegram delivery test with the production code measured 184 MiB peak process RAM. Production uses the smaller inference dependencies. Do not install the full `argostranslate` package or GPU PyTorch for this application.
+
+References: [Argos Translate](https://github.com/argosopentech/argos-translate), [model index](https://github.com/argosopentech/argospm-index), [CTranslate2](https://opennmt.net/CTranslate2/).
+
+## Optional Google translation
 
 ### Website method
 
@@ -165,7 +189,7 @@ GOOGLE_TRANSLATE_API_KEY=YOUR_GOOGLE_CLOUD_API_KEY
 
 Alternatively supply `GOOGLE_TRANSLATE_API_KEY` in the process environment. Never commit your real key.
 
-7. Run `python check_connection.py` and look for `Google translation (google_cloud): OK`. Restart the service after changing configuration.
+7. Run `python check_connection.py` and look for `Translation (google_cloud): OK`. Restart the service after changing configuration.
 
 Official references: [setup](https://docs.cloud.google.com/translate/docs/setup), [authentication](https://docs.cloud.google.com/translate/docs/authentication), [Basic v2 API](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate).
 
@@ -229,7 +253,7 @@ Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: 
 
 Listing messages include the publication date/time **when explicitly available**, and the separately labeled last-update time shown by FINN. Many listings expose only `Sist endret` (last updated); these show `Published: Not provided by FINN` rather than mislabeling the update time as publication. Times retain FINN's displayed local time. The visible address/postal area links to FINN's map and also has an `Open map` button. A postal-area location is not necessarily an exact street address.
 
-Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. `Copy listing link` and `Copy address` buttons copy those fields directly. Telegram's native copy buttons allow only 256 characters, so `Copy text` is provided only for short text parts. Longer text remains complete in the copyable block; the exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace only `finn_alert.py`, and run it again; preserve `config.json`, `.env`, and `state.sqlite3`.
+Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. `Copy listing link` and `Copy address` buttons copy those fields directly. Telegram's native copy buttons allow only 256 characters, so `Copy text` is provided only for short text parts. Longer text remains complete in the copyable block; the exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, and `requirements.txt`, install the updated requirements, run `python setup_translation.py` if the offline model is not installed, select `argos` in the translation configuration, and run it again; preserve `config.json`, `.env`, and `state.sqlite3`.
 
 FINN search and listing-detail fetch/parsing failures send an English `FINN Alert | Fetch error` notification to the same configured Telegram destination. It includes UTC time, the failing stage, a safe error description (such as HTTP 403/429 or a network timeout), and the FINN page path. Query strings, tokens, and raw network exception details are omitted. Identical errors in the same stage, including errors affecting different listings, are grouped and reported at most once per 30 minutes by default. A different error is reported immediately. The cooldown is stored in SQLite and survives restarts. Existing configurations automatically use the default; add `error_alert_interval_seconds` to customize it.
 
@@ -243,6 +267,25 @@ Preview and connectivity checks do not send these alerts. If Telegram or the ent
 - Every configured search page is scanned. Listings removed between polls or pushed beyond `max_pages` can be missed, especially after downtime. Featured listings can affect chronological ordering.
 - A long delivery queue can delay the next poll. Linux file locking prevents two production instances sharing the same database.
 
+## Existing server deployment (October 7, 2026)
+
+The updated bot runs in tmux session `FINN`, window `0`, from `/root/FINN`, using `.venv-offline/bin/python`. Its `run-bot.sh` wrapper limits the process to 256 MiB memory and 50% of one CPU with a transient systemd scope. Output is appended to `/root/FINN/finn-alert.log`.
+
+```bash
+tmux attach -t FINN
+tail -n 50 /root/FINN/finn-alert.log
+```
+
+In tmux, use `Ctrl+B`, then `0` to select the bot window. Stop with `Ctrl+C`. From a shell in that window, restart with:
+
+```bash
+bash /root/FINN/run-bot.sh >> /root/FINN/finn-alert.log 2>&1
+```
+
+Credentials were migrated into `/root/FINN/.env`. Search filters, polling interval, initial mode and the SQLite queue were preserved. A private backup of the earlier code, configuration and database is in `/root/FINN/backup-20261007T075823Z`. Do not share that backup because the older configuration contains credentials. The `argos-run` tmux window and `/root/argos-test` hold the earlier isolated experiments; the running bot uses `/root/FINN/models/nb-en`.
+
+This tmux deployment does not automatically start after reboot. Use the systemd installation above when automatic startup is wanted.
+
 ## Tests and Git
 
 ```bash
@@ -250,6 +293,6 @@ python -m unittest discover -s tests -v
 git status
 ```
 
-Tests run without network calls or real messages. Live Telegram authentication, group lookup, test delivery, and FINN extraction succeeded on October 6, 2026. Website translation returned HTTP 429; official API translation needs a real key for a live test.
+Tests run without network calls or real messages. Offline model inference has also been tested with socket connections and DNS blocked. Live Telegram authentication, group lookup, test delivery, and FINN extraction succeeded on October 6, 2026. Website translation returned HTTP 429; official API translation needs a real key for a live test.
 
 The local Git repository ignores private `.env` files, databases, and logs. Share `config.json`, `config.example.json`, and `.env.example`; they contain no credentials. No GitHub remote is configured automatically.

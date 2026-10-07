@@ -6,6 +6,7 @@
   "initial_mode": "send",
   "database": "state.sqlite3",
   "translation": {
-    "provider": "google_web"
+    "provider": "argos",
+    "model_path": "models/nb-en"
   }
 }
