@@ -65,16 +65,16 @@ class PhotoTests(unittest.TestCase):
         self.assertEqual(db.execute('SELECT status FROM ads').fetchone()[0],'sent')
         db.close()
 
-    def test_photos_precede_bilingual_text_and_survive_translation_failure(self):
+    def test_bilingual_text_precedes_photos_and_survives_translation_failure(self):
         bot=Bot({},None)
         bot.translate=Mock(return_value='English')
         bot.detail_metadata[URL]={'photos':[PHOTO,PHOTO+'b']}
         messages=bot.listing_messages(URL,'Original','Description')
-        self.assertEqual(messages[0]['_method'],'sendMediaGroup')
-        self.assertIn('Original text:',messages[1]['text'])
-        self.assertIn('Translated to English:',messages[1]['text'])
+        self.assertEqual(messages[-1]['_method'],'sendMediaGroup')
+        self.assertIn('Original text:',messages[0]['text'])
+        self.assertIn('Translated to English:',messages[0]['text'])
         bot.translate.side_effect=ServiceError('offline failed')
         bot.detail_metadata[URL]={'photos':[PHOTO]}
         messages=bot.listing_messages(URL,'Original','Description')
-        self.assertEqual(messages[0]['_method'],'sendPhoto')
-        self.assertIn('Translation failed',messages[1]['text'])
+        self.assertEqual(messages[-1]['_method'],'sendPhoto')
+        self.assertIn('Translation failed',messages[0]['text'])

@@ -373,12 +373,12 @@ class Bot:
         try:
             body = self.translate(original)
             heading = "FINN | English"
-            return photos + rich_messages(url, body, heading, metadata, original=original)
+            return rich_messages(url, body, heading, metadata, original=original) + photos
         except ServiceError as exc:
             LOG.warning("Translation failed; sending original listing: %s", exc)
             body = original
             heading = "FINN | Translation failed. Original text follows."
-        return photos + rich_messages(url, body, heading, metadata)
+        return rich_messages(url, body, heading, metadata) + photos
 
     def enqueue(self, items):
         # Baselines belong to a search, so changing filters starts a new baseline.
