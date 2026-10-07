@@ -17,6 +17,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
+from dotenv import dotenv_values
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, TemplateString
 
@@ -40,6 +41,8 @@ def finn_url(url):
 
 
 def load_config(path):
+    path = Path(path)
+    env = dotenv_values(path.parent / ".env", encoding="utf-8-sig", interpolate=False)
     c = json.loads(path.read_text(encoding="utf-8-sig"))
     c.setdefault("error_alert_interval_seconds", 1800)
     finn_url(c["search_url"])
@@ -53,9 +56,12 @@ def load_config(path):
         raise ValueError("initial_mode must be send or skip")
     if c["translation"]["provider"] not in ("google_web", "google_cloud"):
         raise ValueError("Unknown translation provider")
-    c["telegram"]["bot_token"] = os.getenv("TELEGRAM_BOT_TOKEN") or c["telegram"]["bot_token"]
-    c["telegram"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID") or str(c["telegram"]["chat_id"])
-    c["translation"]["google_api_key"] = os.getenv("GOOGLE_TRANSLATE_API_KEY") or c["translation"].get("google_api_key", "")
+    c["telegram"] = {
+        "bot_token": os.getenv("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN") or "",
+        "chat_id": os.getenv("TELEGRAM_CHAT_ID") or env.get("TELEGRAM_CHAT_ID") or "",
+    }
+    c["translation"]["google_api_key"] = (os.getenv("GOOGLE_TRANSLATE_API_KEY")
+                                           or env.get("GOOGLE_TRANSLATE_API_KEY") or "")
     c["database"] = str(path.parent / c.get("database", "state.sqlite3"))
     return c
 
@@ -376,9 +382,9 @@ def main():
             print(json.dumps(bot.listing_messages(url, title, desc), ensure_ascii=False, indent=2))
             return 0
         if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
-            raise ValueError("Set a valid Telegram bot token in config or TELEGRAM_BOT_TOKEN")
+            raise ValueError("Set a valid TELEGRAM_BOT_TOKEN in .env or the process environment")
         if "your_channel" in c["telegram"]["chat_id"] or not c["telegram"]["chat_id"]:
-            raise ValueError("Set telegram.chat_id")
+            raise ValueError("Set TELEGRAM_CHAT_ID in .env or the process environment")
         # Linux flock prevents two processes from using the same delivery queue.
         with open(c["database"] + ".lock", "a") as lock:
             if os.name == "posix":

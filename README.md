@@ -1,6 +1,6 @@
 # FINN Alert
 
-Monitor a FINN search and send new listings to a Telegram group or channel. Notifications contain the listing link and an English translation of the title and full description. If translation fails, the original text is sent with this English notice:
+FINN Alert is a program that takes a FINN search link, a checking interval, and a Telegram group or channel destination, then sends notifications for new listings matching that search. Notifications contain the listing link and an English translation of the title and full description. If translation fails, the original text is sent with this English notice:
 
 > Translation failed. Original text follows.
 
@@ -8,7 +8,7 @@ Requires Python 3.10+. Ubuntu 22.04 / 24.04 supported. Polling defaults to five 
 
 ## Quick setup with WinSCP and a terminal kept open
 
-1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload just these three files: `finn_alert.py`, `requirements.txt`, and your configured `config.json` (containing your Telegram token and destination).
+1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload `finn_alert.py`, `requirements.txt`, `config.json`, and your private `.env`. Set the search link and polling interval in `config.json`; set the Telegram token and group/channel destination in `.env` (use `.env.example` as a template).
 2. Open a terminal on the server and run the following one-time installation:
 
 ```bash
@@ -18,7 +18,7 @@ sudo apt install -y python3 python3-venv
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-chmod 600 config.json
+chmod 600 .env
 ```
 
 3. Start the bot directly:
@@ -51,8 +51,9 @@ sudo chown -R finn-alert:finn-alert /opt/finn-alert
 cd /opt/finn-alert
 sudo -u finn-alert python3 -m venv .venv
 sudo -u finn-alert .venv/bin/pip install -r requirements.txt
-sudo -u finn-alert cp config.example.json config.json
-sudo chmod 600 config.json
+sudo -u finn-alert cp .env.example .env
+sudo chmod 600 .env
+sudo nano .env
 sudo nano config.json
 ```
 
@@ -69,12 +70,12 @@ Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo 
 | `request_delay_seconds` | Request delay; default `2` seconds |
 | `initial_mode` | `send`: send existing results on first run; `skip`: baseline existing results and send only newly discovered listings |
 | `database` | SQLite path relative to the configuration file |
-| `telegram.bot_token` | Complete BotFather token |
-| `telegram.chat_id` | Numeric group/private-channel ID or public channel `@username` |
+| `TELEGRAM_BOT_TOKEN` (`.env`) | Complete BotFather token |
+| `TELEGRAM_CHAT_ID` (`.env`) | Numeric group/private-channel ID or public channel `@username` |
 | `translation.provider` | `google_web` or `google_cloud` |
-| `translation.google_api_key` | API key for `google_cloud` |
+| `GOOGLE_TRANSLATE_API_KEY` (`.env`) | API key for `google_cloud` |
 
-Environment variables `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, and `GOOGLE_TRANSLATE_API_KEY` override the corresponding values. Restart after editing the configuration.
+The program automatically reads `.env` beside the selected configuration file, including with `--config`. Process environment variables override `.env` values. Keep credentials and the Telegram destination in `.env`; `config.json` is safe to share in Git. Copy `.env.example` to `.env` for a new installation. Restart after editing either file.
 
 ## Telegram setup and group ID
 
@@ -99,8 +100,8 @@ Find the `chat` object whose `title` matches your group:
 
 Use the actual `chat.id` with its minus sign, without `@`:
 
-```json
-"chat_id": "-1001234567890"
+```dotenv
+TELEGRAM_CHAT_ID=-1001234567890
 ```
 
 Do not use `from.id`, which identifies the sender. If `result` is empty, send the group command again and refresh. An active webhook prevents `getUpdates`; another bot application may consume updates. This notifier only sends messages and does not consume updates.
@@ -148,13 +149,18 @@ This program supports **Cloud Translation Basic v2, standard NMT**, with English
 3. Under **APIs & Services > Library**, enable **Cloud Translation API**.
 4. Under **APIs & Services > Credentials > Create credentials > API key**, create an API key for Basic v2.
 5. Restrict the key to Cloud Translation API. If using IP restrictions, allow the public IP of the machine running this script, including the development machine during testing.
-6. Replace the existing translation section in your private `config.json`:
+6. Set the translation provider in `config.json`:
 
 ```json
 "translation": {
-  "provider": "google_cloud",
-  "google_api_key": "YOUR_GOOGLE_CLOUD_API_KEY"
+  "provider": "google_cloud"
 }
+```
+
+Put the key in your private `.env`:
+
+```dotenv
+GOOGLE_TRANSLATE_API_KEY=YOUR_GOOGLE_CLOUD_API_KEY
 ```
 
 Alternatively supply `GOOGLE_TRANSLATE_API_KEY` in the process environment. Never commit your real key.
@@ -223,7 +229,7 @@ Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: 
 
 Listing messages include the publication date/time **when explicitly available**, and the separately labeled last-update time shown by FINN. Many listings expose only `Sist endret` (last updated); these show `Published: Not provided by FINN` rather than mislabeling the update time as publication. Times retain FINN's displayed local time. The visible address/postal area links to FINN's map and also has an `Open map` button. A postal-area location is not necessarily an exact street address.
 
-Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. `Copy listing link` and `Copy address` buttons copy those fields directly. Telegram's native copy buttons allow only 256 characters, so `Copy text` is provided only for short text parts. Longer text remains complete in the copyable block; the exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace only `finn_alert.py`, and run it again; preserve `config.json` and `state.sqlite3`.
+Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. `Copy listing link` and `Copy address` buttons copy those fields directly. Telegram's native copy buttons allow only 256 characters, so `Copy text` is provided only for short text parts. Longer text remains complete in the copyable block; the exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace only `finn_alert.py`, and run it again; preserve `config.json`, `.env`, and `state.sqlite3`.
 
 FINN search and listing-detail fetch/parsing failures send an English `FINN Alert | Fetch error` notification to the same configured Telegram destination. It includes UTC time, the failing stage, a safe error description (such as HTTP 403/429 or a network timeout), and the FINN page path. Query strings, tokens, and raw network exception details are omitted. Identical errors in the same stage, including errors affecting different listings, are grouped and reported at most once per 30 minutes by default. A different error is reported immediately. The cooldown is stored in SQLite and survives restarts. Existing configurations automatically use the default; add `error_alert_interval_seconds` to customize it.
 
@@ -246,4 +252,4 @@ git status
 
 Tests run without network calls or real messages. Live Telegram authentication, group lookup, test delivery, and FINN extraction succeeded on October 6, 2026. Website translation returned HTTP 429; official API translation needs a real key for a live test.
 
-The local Git repository ignores `config.json`, `.env` files, databases, and logs. Share `config.example.json` only. No GitHub remote is configured automatically.
+The local Git repository ignores private `.env` files, databases, and logs. Share `config.json`, `config.example.json`, and `.env.example`; they contain no credentials. No GitHub remote is configured automatically.

@@ -1,7 +1,6 @@
 {
   "search_url": "https://www.finn.no/recommerce/forsale/search?location=1.22046.20220&sort=PUBLISHED_DESC&trade_type=2",
   "poll_interval_seconds": 300,
-  "error_alert_interval_seconds": 1800,
   "max_pages": 3,
   "request_delay_seconds": 2,
   "initial_mode": "send",
