@@ -1,6 +1,6 @@
 # FINN Alert
 
-FINN Alert is a program that takes a FINN search link, a checking interval, and a Telegram group or channel destination, then sends notifications for new listings matching that search. Notifications contain the listing link and an English translation of the title and full description. If translation fails, the original text is sent with this English notice:
+FINN Alert is a program that takes a FINN search link, a checking interval, and a Telegram group or channel destination, then sends notifications for new listings matching that search. Notifications contain the listing link, original title and full description under `Original text:`, and their English translation under `Translated to English:`. Both sections use separate copyable code blocks. If translation fails, the original text is sent with this English notice:
 
 > Translation failed. Original text follows.
 
@@ -152,7 +152,7 @@ The model path is relative to the selected configuration file. For a custom loca
 
 The runtime loads CTranslate2 and SentencePiece directly, uses CPU int8 inference and one inference thread, and reuses the model between listings. It does not import the full Argos, Stanza, or PyTorch runtime. No Google key is required. Missing models or translation errors send the original text with an English warning.
 
-English titles and descriptions are sent inside Telegram HTML `<pre>` code blocks, with listing links, dates and map controls outside the blocks. This retains the full text and enables copying in supported clients.
+Original titles and descriptions and their English translations are sent inside separate Telegram HTML `<pre>` code blocks, with listing links, dates and map controls outside the blocks. This retains the full text and enables copying in supported clients.
 
 Measured on the Ubuntu 24.04 test server with 961 MiB RAM: direct inference used about 163 MiB peak process RAM and took 0.8-3.9 seconds for three short listings under a 50% CPU quota. These are sample measurements, not limits for larger listings. The earlier complete Argos test installation occupied about 1.6 GiB and exceeded a 320 MiB memory limit; the deployed production environment measured about 230 MiB plus 77 MiB for the model. A live FINN-to-Telegram delivery test with the production code measured 184 MiB peak process RAM. Production uses the smaller inference dependencies. Do not install the full `argostranslate` package or GPU PyTorch for this application.
 

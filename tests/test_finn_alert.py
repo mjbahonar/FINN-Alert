@@ -75,8 +75,29 @@ class Tests(unittest.TestCase):
         self.bot.translate = Mock(return_value='English title and description')
         message = self.bot.listing_messages(ITEM, 'Original', 'Description')[0]
         self.assertIn('FINN | English', message['text'])
+        self.assertIn('Original text:', message['text'])
+        self.assertIn('Translated to English:', message['text'])
+        self.assertIn('<pre>Original\n\nDescription</pre>', message['text'])
         self.assertIn('<pre>English title and description</pre>', message['text'])
         self.assertEqual(message['parse_mode'], 'HTML')
+
+    def test_bilingual_long_text_is_complete_and_fits_telegram(self):
+        from bs4 import BeautifulSoup
+        original = "😀<&> " * 1000
+        translated = "English<&> " * 1500
+        self.bot.translate = Mock(return_value=translated)
+        messages = self.bot.listing_messages(ITEM, "Title", original)
+        originals, translations = [], []
+        for message in messages:
+            soup = BeautifulSoup(message['text'], 'html.parser')
+            self.assertLess(len(soup.get_text().encode('utf-16-le')) // 2, 4096)
+            for label in soup.select('b'):
+                if label.get_text() == 'Original text:':
+                    originals.append(label.find_next('pre').get_text())
+                if label.get_text() == 'Translated to English:':
+                    translations.append(label.find_next('pre').get_text())
+        self.assertEqual(''.join(originals), 'Title\n\n' + original)
+        self.assertEqual(''.join(translations), translated)
 
     def test_fallback_is_cached_when_telegram_fails(self):
         self.bot.enqueue({'123': ITEM})

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import html
 import json
+from itertools import zip_longest
 import logging
 import os
 from pathlib import Path
@@ -147,7 +148,7 @@ def parse_metadata(source):
     return metadata
 
 
-def rich_messages(url, body, heading, metadata):
+def rich_messages(url, body, heading, metadata, original=None):
     header = (f"<b>{html.escape(heading)}</b>\n"
               f'<a href="{html.escape(url, quote=True)}">Open FINN listing</a>\n'
               f"Published: {html.escape(metadata.get('published', 'Not provided by FINN'))}\n")
@@ -164,11 +165,21 @@ def rich_messages(url, body, heading, metadata):
     if map_url:
         buttons.append([{"text": "Open map", "url": map_url}])
     messages = []
-    for part in chunks(body, 1500):
+    parts = (("", part) for part in chunks(body, 1500)) if original is None else zip_longest(
+        chunks(original, 700), chunks(body, 700), fillvalue="")
+    for original_part, part in parts:
         rows = [list(row) for row in buttons]
         if len(part) <= 256:
             rows.append([{"text": "Copy text", "copy_text": {"text": part}}])
-        messages.append({"text": header + "\n<pre>" + html.escape(part) + "</pre>",
+        if original is None:
+            content = "<pre>" + html.escape(part) + "</pre>"
+        else:
+            content = ""
+            if original_part:
+                content += "<b>Original text:</b>\n<pre>" + html.escape(original_part) + "</pre>"
+            if part:
+                content += "\n\n<b>Translated to English:</b>\n<pre>" + html.escape(part) + "</pre>"
+        messages.append({"text": header + "\n" + content,
                          "parse_mode": "HTML", "reply_markup": {"inline_keyboard": rows}})
     return messages
 
@@ -307,6 +318,8 @@ class Bot:
         try:
             body = self.translate(original)
             heading = "FINN | English"
+            metadata = self.detail_metadata.pop(url, {})
+            return rich_messages(url, body, heading, metadata, original=original)
         except ServiceError as exc:
             LOG.warning("Translation failed; sending original listing: %s", exc)
             body = original
