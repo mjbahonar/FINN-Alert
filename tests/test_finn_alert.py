@@ -3,7 +3,7 @@ import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
-from finn_alert import Bot, ServiceError, STOP, chunks, database, parse_detail, parse_search, parse_metadata, rich_messages
+from finn_alert import Bot, ServiceError, HttpError, STOP, chunks, database, parse_detail, parse_search, parse_metadata, rich_messages, request
 
 URL = "https://www.finn.no/recommerce/forsale/search?trade_type=2"
 ITEM = "https://www.finn.no/recommerce/forsale/item/123"
@@ -19,6 +19,37 @@ class Tests(unittest.TestCase):
     def tearDown(self):
         self.db.close()
         STOP.clear()
+
+    def test_missing_listing_does_not_block_or_retry(self):
+        for status in (404, 410):
+            with self.subTest(status=status):
+                self.db.execute('DELETE FROM ads')
+                self.bot.enqueue({'124': ITEM + '4', '123': ITEM})
+                self.bot.fetch = Mock(side_effect=HttpError(status))
+                self.bot.report_fetch_error = Mock()
+                self.bot.send = Mock()
+                self.db.execute('UPDATE ads SET messages=? WHERE id=?', (json.dumps(['next listing']), '124'))
+                self.db.commit()
+                with patch.object(STOP, 'wait'):
+                    self.assertTrue(self.bot.deliver())
+                    self.assertTrue(self.bot.deliver())
+                self.assertEqual(self.db.execute('SELECT id,status FROM ads ORDER BY id').fetchall(), [('123', 'unavailable'), ('124', 'sent')])
+                self.bot.fetch.assert_called_once_with(ITEM)
+                self.bot.send.assert_called_once_with('next listing')
+                self.bot.report_fetch_error.assert_not_called()
+
+    def test_http_status_preserved_and_temporary_failure_retained(self):
+        session = Mock()
+        session.request.return_value.status_code = 404
+        with self.assertRaises(HttpError) as caught:
+            request(session, 'GET', URL)
+        self.assertEqual(caught.exception.status_code, 404)
+        self.bot.enqueue({'123': ITEM})
+        self.bot.fetch = Mock(side_effect=HttpError(429))
+        self.bot.report_fetch_error = Mock()
+        self.assertFalse(self.bot.deliver())
+        self.assertEqual(self.db.execute('SELECT status FROM ads').fetchone()[0], 'pending')
+        self.bot.report_fetch_error.assert_called_once()
 
     def test_links_unique_and_pagination(self):
         items, next_url = parse_search(f'<a href="{ITEM}"></a><a href="{ITEM}"></a><a rel="next" href="?page=2"></a>', URL)

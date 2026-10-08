@@ -30,6 +30,16 @@ class ServiceError(Exception):
     pass
 
 
+class HttpError(ServiceError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f"Remote service returned HTTP {status_code}")
+
+
+class ListingUnavailable(ServiceError):
+    pass
+
+
 class ListingParseError(ServiceError):
     pass
 
@@ -75,7 +85,7 @@ def request(session, method, url, **kwargs):
     except requests.RequestException:
         raise ServiceError("Network request failed or timed out") from None
     if response.status_code != 200:
-        raise ServiceError(f"Remote service returned HTTP {response.status_code}")
+        raise HttpError(response.status_code)
     return response
 
 
@@ -300,6 +310,8 @@ class Bot:
         try:
             source = self.fetch(url)
         except (ServiceError, ValueError) as exc:
+            if isinstance(exc, HttpError) and exc.status_code in (404, 410):
+                raise ListingUnavailable(str(exc)) from None
             self.report_fetch_error("Listing details", url, exc)
             raise ServiceError(str(exc)) from None
         try:
@@ -404,6 +416,11 @@ class Bot:
                 if stored is None:
                     try:
                         title, desc = self.listing_detail(url)
+                    except ListingUnavailable as exc:
+                        with self.db:
+                            self.db.execute("UPDATE ads SET status='unavailable' WHERE id=?", (ident,))
+                        LOG.info("Listing %s is unavailable; skipped: %s", ident, exc)
+                        continue
                     except ListingParseError:
                         LOG.error("Listing %s has no readable description; retained for a later poll", ident)
                         failed = True
