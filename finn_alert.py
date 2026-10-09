@@ -18,6 +18,7 @@ import time
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
+from postal_distance import approximate_distance, validate_distance
 from dotenv import dotenv_values
 from bs4 import BeautifulSoup
 from bs4.element import NavigableString, TemplateString
@@ -59,6 +60,7 @@ def load_config(path):
     path = Path(path)
     env = dotenv_values(path.parent / ".env", encoding="utf-8-sig", interpolate=False)
     c = json.loads(path.read_text(encoding="utf-8-sig"))
+    validate_distance(c.get("distance", {}))
     c.setdefault("error_alert_interval_seconds", 1800)
     finn_url(c["search_url"])
     for name in ("poll_interval_seconds", "max_pages", "request_delay_seconds", "error_alert_interval_seconds"):
@@ -216,6 +218,8 @@ def rich_messages(url, body, heading, metadata, original=None):
               f"Published: {html.escape(metadata.get('published', 'Not provided by FINN'))}\n")
     if metadata.get("updated"):
         header += "Last updated: " + html.escape(metadata["updated"]) + "\n"
+    if metadata.get("distance_km") is not None:
+        header += f"Approx. distance: {metadata['distance_km']:.1f} km\n"
     address = metadata.get("address", "")
     map_url = metadata.get("map_url")
     google_map_url = ("https://www.google.com/maps/search/?" + urlencode(
@@ -436,6 +440,13 @@ class Bot:
     def listing_messages(self, url, title, description):
         original = title + "\n\n" + description
         metadata = self.detail_metadata.pop(url, {})
+        try:
+            distance = approximate_distance(metadata.get("address", ""), self.c.get("distance", {}))
+        except (OSError, ValueError):
+            LOG.warning("Postal distance data unavailable; omitting distance")
+            distance = None
+        if distance is not None:
+            metadata["distance_km"] = distance
         photos = photo_messages(url, metadata.pop("photos", []))
         try:
             body = self.translate(original)

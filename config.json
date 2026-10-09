@@ -9,5 +9,10 @@
     "provider": "argos",
     "model_path": "models/nb-en"
   },
-  "send_photos": true
+  "send_photos": true,
+  "distance": {
+    "enabled": true,
+    "origin_latitude": 60.37891870202219,
+    "origin_longitude": 5.356616006956909
+  }
 }

@@ -264,6 +264,22 @@ References: [Telegram albums](https://core.telegram.org/bots/api#sendmediagroup)
 
 ## Delivery behavior and limitations
 
+### Approximate distance (optional)
+
+Configure `distance` in `config.json`:
+
+```json
+"distance": {
+  "enabled": true,
+  "origin_latitude": 60.37891870202219,
+  "origin_longitude": 5.356616006956909
+}
+```
+
+Set `enabled` to `false` to hide distances. Newly prepared posts show only `Approx. distance: 2.4 km`, without publishing the origin coordinates. This is straight-line distance to the estimated postal-code center, not driving distance or the seller's exact location. Missing or unknown postal codes omit the distance. Existing configurations default to disabled. Restart after changing the configuration; prepared and previously sent messages retain their existing content.
+
+Calculations run offline without a Google API key or extra dependencies. Copy `postal_distance.py` and the `data/` directory when installing or upgrading the server. The bundled `data/postal_codes_no.json` was derived from [GeoNames Norway postal data](https://download.geonames.org/export/zip/NO.zip), retrieved October 9, 2026, using estimated WGS84 coordinates. The source archive is dated 2015 and may omit newer postal codes. Attribution: GeoNames, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); source documentation is included in `data/GEONAMES-README.txt`. The derived file retains only postal codes and coordinates.
+
 Each newly prepared listing with a visible area/postal address also includes a Google Maps link and button. It searches for the displayed address plus Norway, so a postal code opens its area rather than claiming the seller's exact location. No Google API key is required. Listings without location information omit this link; previously sent or prepared messages are not rewritten.
 
 If Telegram returns HTTP 400 while fetching photo URLs, the bot downloads the FINN images and retries that photo part as a multipart upload (up to 10 MiB per image). Images are held temporarily in memory. If an image is gone, too large, or Telegram rejects the upload with HTTP 400, that photo part is logged and skipped so other listings continue; already delivered text is preserved. Network failures, HTTP 429, and server errors remain queued for retry. A timeout never triggers an immediate upload retry because Telegram may already have accepted the original request.
