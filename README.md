@@ -264,6 +264,8 @@ References: [Telegram albums](https://core.telegram.org/bots/api#sendmediagroup)
 
 ## Delivery behavior and limitations
 
+Each newly prepared listing with a visible area/postal address also includes a Google Maps link and button. It searches for the displayed address plus Norway, so a postal code opens its area rather than claiming the seller's exact location. No Google API key is required. Listings without location information omit this link; previously sent or prepared messages are not rewritten.
+
 If Telegram returns HTTP 400 while fetching photo URLs, the bot downloads the FINN images and retries that photo part as a multipart upload (up to 10 MiB per image). Images are held temporarily in memory. If an image is gone, too large, or Telegram rejects the upload with HTTP 400, that photo part is logged and skipped so other listings continue; already delivered text is preserved. Network failures, HTTP 429, and server errors remain queued for retry. A timeout never triggers an immediate upload retry because Telegram may already have accepted the original request.
 
 Listing-detail HTTP 404 (not found) and 410 (gone) responses mark the listing as `unavailable` in SQLite and continue with the next queued listing. These entries are not retried or repeatedly reported to Telegram. Search-page errors and temporary listing failures such as HTTP 403/429/5xx or network timeouts still use the retry and error-alert behavior below. Preserve `state.sqlite3` when upgrading; no database migration is needed.

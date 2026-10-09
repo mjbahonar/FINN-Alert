@@ -20,6 +20,16 @@ class Tests(unittest.TestCase):
         self.db.close()
         STOP.clear()
 
+    def test_google_maps_uses_postal_area_and_country(self):
+        from urllib.parse import urlsplit, parse_qs
+        message = rich_messages(ITEM, 'Description', 'FINN', {'address': '0250 Oslo & sentrum'})[0]
+        buttons = [button for row in message['reply_markup']['inline_keyboard'] for button in row]
+        link = next(button['url'] for button in buttons if button['text'] == 'Google Maps')
+        self.assertEqual(parse_qs(urlsplit(link).query), {'api': ['1'], 'query': ['0250 Oslo & sentrum, Norway']})
+        self.assertIn('Google Maps</a>', message['text'])
+        missing = rich_messages(ITEM, 'Description', 'FINN', {})[0]
+        self.assertNotIn('Google Maps', missing['text'])
+
     def test_missing_listing_does_not_block_or_retry(self):
         for status in (404, 410):
             with self.subTest(status=status):

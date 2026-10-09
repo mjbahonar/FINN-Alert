@@ -218,14 +218,19 @@ def rich_messages(url, body, heading, metadata, original=None):
         header += "Last updated: " + html.escape(metadata["updated"]) + "\n"
     address = metadata.get("address", "")
     map_url = metadata.get("map_url")
+    google_map_url = ("https://www.google.com/maps/search/?" + urlencode(
+        {"api": "1", "query": address + ", Norway"})) if address else None
     if address:
         label = html.escape(address[:300])
         header += (f'Area: <a href="{html.escape(map_url, quote=True)}">{label}</a>\n' if map_url else f"Area: {label}\n")
+        header += f'<a href="{html.escape(google_map_url, quote=True)}">Google Maps</a>\n'
     buttons = [[{"text": "Copy listing link", "copy_text": {"text": url}}]]
     if address and len(address) <= 256:
         buttons[0].append({"text": "Copy address", "copy_text": {"text": address}})
     if map_url:
         buttons.append([{"text": "Open map", "url": map_url}])
+    if google_map_url:
+        buttons.append([{"text": "Google Maps", "url": google_map_url}])
     messages = []
     parts = (("", part) for part in chunks(body, 1500)) if original is None else zip_longest(
         chunks(original, 700), chunks(body, 700), fillvalue="")
