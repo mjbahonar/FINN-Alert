@@ -40,6 +40,10 @@ class ListingUnavailable(ServiceError):
     pass
 
 
+class TelegramMediaRejected(ServiceError):
+    pass
+
+
 class ListingParseError(ServiceError):
     pass
 
@@ -370,7 +374,53 @@ class Bot:
         if method not in ("sendMessage", "sendPhoto", "sendMediaGroup"):
             raise ServiceError("Unknown Telegram delivery method")
         payload["chat_id"] = self.c["telegram"]["chat_id"]
-        r = request(self.session, "POST", f"https://api.telegram.org/bot{token}/{method}", json=payload)
+        endpoint = f"https://api.telegram.org/bot{token}/{method}"
+        try:
+            r = request(self.session, "POST", endpoint, json=payload)
+        except HttpError as exc:
+            if exc.status_code != 400 or method == "sendMessage":
+                raise
+            # Telegram may fail to fetch a valid CDN URL. Upload the actual
+            # images after an explicit rejection (never after a timeout).
+            files = {}
+            upload = dict(payload)
+            media = [dict(item) for item in payload.get("media", [])]
+            urls = [item["media"] for item in media] if media else [payload["photo"]]
+            for index, url in enumerate(urls):
+                p = urlsplit(url)
+                if p.scheme != "https" or p.netloc != "images.finncdn.no":
+                    raise TelegramMediaRejected("Photo URL is not a FINN image") from None
+                try:
+                    image_response = request(self.session, "GET", url, stream=True)
+                except HttpError as image_exc:
+                    if image_exc.status_code in (400, 404, 410):
+                        raise TelegramMediaRejected("Photo is no longer available") from None
+                    raise
+                try:
+                    with image_response:
+                        data = bytearray()
+                        for chunk in image_response.iter_content(65536):
+                            data.extend(chunk)
+                            if len(data) > 10 * 1024 * 1024:
+                                raise TelegramMediaRejected("Photo exceeds upload limit")
+                except requests.RequestException:
+                    raise ServiceError("Photo download failed or timed out") from None
+                name = f"photo{index}"
+                files[name] = (name + ".jpg", bytes(data), "image/jpeg")
+                if media:
+                    media[index]["media"] = "attach://" + name
+                else:
+                    upload.pop("photo")
+                    files["photo"] = files.pop(name)
+            if media:
+                upload["media"] = json.dumps(media)
+            LOG.info("Telegram rejected photo URLs; retrying with uploaded images")
+            try:
+                r = request(self.session, "POST", endpoint, data=upload, files=files)
+            except HttpError as upload_exc:
+                if upload_exc.status_code == 400:
+                    raise TelegramMediaRejected("Telegram rejected uploaded photos; text was preserved") from None
+                raise
         try:
             ok = r.json().get("ok")
         except ValueError:
@@ -433,7 +483,10 @@ class Bot:
                 for i in range(next_part, len(messages)):
                     if STOP.is_set():
                         return False
-                    self.send(messages[i])
+                    try:
+                        self.send(messages[i])
+                    except TelegramMediaRejected as exc:
+                        LOG.warning("Listing %s photo part %s skipped: %s", ident, i, exc)
                     with self.db:
                         self.db.execute("UPDATE ads SET next_part=? WHERE id=?", (i + 1, ident))
                     STOP.wait(max(3, self.c["request_delay_seconds"]))

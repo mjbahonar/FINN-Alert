@@ -1,13 +1,45 @@
 import json
 import unittest
 from unittest.mock import Mock, patch
-from finn_alert import Bot, STOP, ServiceError, database, parse_photos, photo_messages
+from finn_alert import Bot, STOP, ServiceError, HttpError, TelegramMediaRejected, database, parse_photos, photo_messages
 
 URL = "https://www.finn.no/recommerce/forsale/item/123"
 PHOTO = "https://images.finncdn.no/dynamic/960w/item/123/a"
 
 
 class PhotoTests(unittest.TestCase):
+    def test_rejected_album_uploads_images_without_mutating_queue(self):
+        bot = Bot({'telegram': {'bot_token': 'fake', 'chat_id': '-123'}}, None)
+        message = photo_messages(URL, [PHOTO, PHOTO+'b'])[0]
+        before = json.dumps(message)
+        image = Mock()
+        image.__enter__ = Mock(return_value=image)
+        image.__exit__ = Mock(return_value=False)
+        image.iter_content.return_value = [b'jpeg bytes']
+        success = Mock()
+        success.json.return_value = {'ok': True}
+        with patch('finn_alert.request', side_effect=[HttpError(400), image, image, success]) as call:
+            bot.send(message)
+        uploaded = call.call_args.kwargs
+        self.assertEqual(len(uploaded['files']), 2)
+        self.assertEqual(json.loads(uploaded['data']['media'])[0]['media'], 'attach://photo0')
+        self.assertEqual(json.dumps(message), before)
+
+    def test_rejected_photo_does_not_block_next_listing(self):
+        db = database(':memory:')
+        try:
+            bot = Bot({'search_url':URL, 'initial_mode':'send', 'request_delay_seconds':0}, db)
+            bot.enqueue({'124': URL+'4', '123':URL})
+            db.execute('UPDATE ads SET messages=? WHERE id=?', (json.dumps(photo_messages(URL,[PHOTO])), '123'))
+            db.execute('UPDATE ads SET messages=? WHERE id=?', (json.dumps(['next listing']), '124'))
+            db.commit()
+            bot.send = Mock(side_effect=[TelegramMediaRejected('Rejected photos'), None])
+            with patch.object(STOP, 'wait'):
+                self.assertTrue(bot.deliver())
+            self.assertEqual(db.execute("SELECT count(*) FROM ads WHERE status='sent'").fetchone()[0], 2)
+        finally:
+            db.close()
+
     def tearDown(self):
         STOP.clear()
 
