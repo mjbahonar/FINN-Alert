@@ -34,5 +34,8 @@ enabled = true
 # true: send important listings, with notification, to TELEGRAM_PRIORITY_CHAT_ID.
 # false: send them to the main group, with notification.
 send_to_group = false
+# true: also send a silent copy of each important listing to the main group
+# (only when send_to_group is true; the priority group is the one that notifies).
+also_send_to_main = false
 keywords = ["gratis", "sykkel"]
 postal_codes = ["5003", "5006"]

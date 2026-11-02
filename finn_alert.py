@@ -72,7 +72,7 @@ def load_priority(section, setting):
     if not isinstance(section, dict):
         raise ValueError("priority must be a table")
     flags = {}
-    for name, default in (("enabled", True), ("send_to_group", False)):
+    for name, default in (("enabled", True), ("send_to_group", False), ("also_send_to_main", False)):
         flags[name] = section.get(name, default)
         if not isinstance(flags[name], bool):
             raise ValueError(f"priority.{name} must be true or false")
@@ -503,8 +503,15 @@ class Bot:
             # A rejected priority group (bot not allowed to post, wrong ID) must not block the whole queue.
             LOG.warning("Priority group rejected the message (HTTP 400); sending to the main group instead")
             self._send(text, main_only=True)
+            return
+        if self.uses_priority_chat(text) and self.c["priority"].get("also_send_to_main"):
+            try:
+                self._send(text, main_only=True, copy=True)
+            except ServiceError:
+                # The priority group already has it; retrying the part would duplicate it there.
+                LOG.warning("Copy to the main group failed; the priority group received the message")
 
-    def _send(self, text, main_only=False):
+    def _send(self, text, main_only=False, copy=False):
         token = self.c["telegram"]["bot_token"]
         # No automatic POST retry: a network timeout might follow a successful send.
         payload = dict(text) if isinstance(text, dict) else {"text": text}
@@ -517,8 +524,10 @@ class Bot:
         if priority and not main_only and self.uses_priority_chat({"_route": "priority"}):
             payload["chat_id"] = telegram["priority_chat_id"]
         if isinstance(text, dict):
-            # Listings are silent unless important; plain strings (error alerts) always notify.
-            payload["disable_notification"] = telegram.get("silent_normal", True) and not priority
+            # Listings are silent unless important, and so are photos and the main-group copy of an
+            # important listing; plain strings (error alerts) always notify.
+            payload["disable_notification"] = method != "sendMessage" or (
+                telegram.get("silent_normal", True) and (not priority or copy))
         endpoint = f"https://api.telegram.org/bot{token}/{method}"
         try:
             r = request(self.session, "POST", endpoint, json=payload)

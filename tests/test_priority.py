@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from finn_alert import Bot, HttpError, TelegramMediaRejected, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
+from finn_alert import Bot, HttpError, ServiceError, TelegramMediaRejected, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
 
 ITEM = "https://www.finn.no/recommerce/forsale/item/123"
 BASE = 'search_url = "https://www.finn.no/recommerce/forsale/search?trade_type=2"\n' \
@@ -83,6 +83,30 @@ class PriorityTests(unittest.TestCase):
             bot.c["telegram"]["silent_normal"] = False
             bot.send(plain[0])
             self.assertFalse(call.call_args.kwargs["json"]["disable_notification"])
+
+    def test_priority_listing_can_go_to_both_groups_and_photos_are_silent(self):
+        config = self.load('[priority]\nsend_to_group = true\nalso_send_to_main = true\n',
+                           ENV + "TELEGRAM_PRIORITY_CHAT_ID=-2\n")
+        bot = Bot(config, None)
+        message = rich_messages(ITEM, "Short", "FINN", {})[0]
+        message["_route"] = "priority"
+        photo = {"_method": "sendPhoto", "photo": "https://images.finncdn.no/dynamic/960w/x.jpg", "_route": "priority"}
+        ok = Mock()
+        ok.json.return_value = {"ok": True}
+        with patch("finn_alert.request", return_value=ok) as call:
+            bot.send(message)
+            sent = [(c.kwargs["json"]["chat_id"], c.kwargs["json"]["disable_notification"]) for c in call.call_args_list]
+            self.assertEqual(sent, [("-2", False), ("-1", True)])
+            call.reset_mock()
+            bot.send(photo)
+            sent = [(c.kwargs["json"]["chat_id"], c.kwargs["json"]["disable_notification"]) for c in call.call_args_list]
+            self.assertEqual(sent, [("-2", True), ("-1", True)])
+        with patch("finn_alert.request", side_effect=[ok, ServiceError("down")]) as call:
+            bot.send(message)
+        self.assertEqual(call.call_count, 2)
+        with patch("finn_alert.request", side_effect=[HttpError(400), ok]) as call:
+            bot.send(message)
+        self.assertEqual(call.call_count, 2)
 
     def test_rejected_priority_group_falls_back_to_main_group(self):
         config = self.load('[priority]\nsend_to_group = true\n', ENV + "TELEGRAM_PRIORITY_CHAT_ID=-2\n")

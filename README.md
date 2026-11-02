@@ -96,13 +96,14 @@ Normal listings are sent with `disable_notification`, so they arrive silently; y
 [priority]
 enabled = true          # master switch
 send_to_group = true    # true: important listings go to TELEGRAM_PRIORITY_CHAT_ID; false: they stay in the main group
+also_send_to_main = true  # true: also send a silent copy to the main group (needs send_to_group = true)
 keywords = ["gratis", "sykkel"]
 postal_codes = ["5003", "5006"]
 ```
 
 Important listings are marked with a `PRIORITY LISTING` banner and a quoted `Reason:` line naming the matched keyword(s) and/or postal code; their photo albums are captioned `PRIORITY`. Important listings always notify with sound. Set `[telegram] silent_normal = false` to make normal listings notify too. Error alerts always notify. The words and postal codes may also be set in `.env` (comma-separated: `PRIORITY_KEYWORDS=gratis,sykkel`, `PRIORITY_POSTAL_CODES=5003,5006`) and are added to the lists in `config.toml`.
 
-To create the second group: add the bot to it, send `/start@YourBotUsername` there, read its ID with `getUpdates` as shown below, and set `TELEGRAM_PRIORITY_CHAT_ID` in `.env`. An important listing is sent only to the chosen destination (not to both groups). The decision is made when the listing is prepared, so already-queued listings keep their earlier routing.
+To create the second group: add the bot to it, send `/start@YourBotUsername` there, read its ID with `getUpdates` as shown below, and set `TELEGRAM_PRIORITY_CHAT_ID` in `.env`. An important listing goes to the priority group; with `also_send_to_main = true` the main group also receives a silent copy (the priority group is the one that notifies). If Telegram rejects the priority group (HTTP 400, for example after Telegram converted the group to a supergroup and changed its ID: the error reply contains `migrate_to_chat_id`), the listing is sent to the main group instead of blocking the queue. Photo albums are always delivered silently, even for important listings. The decision is made when the listing is prepared, so already-queued listings keep their earlier routing.
 
 ## Automatic configuration reload
 
