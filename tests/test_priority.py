@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from finn_alert import Bot, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
+from finn_alert import Bot, HttpError, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
 
 ITEM = "https://www.finn.no/recommerce/forsale/item/123"
 BASE = 'search_url = "https://www.finn.no/recommerce/forsale/search?trade_type=2"\n' \
@@ -83,6 +83,21 @@ class PriorityTests(unittest.TestCase):
             bot.c["telegram"]["silent_normal"] = False
             bot.send(plain[0])
             self.assertFalse(call.call_args.kwargs["json"]["disable_notification"])
+
+    def test_rejected_priority_group_falls_back_to_main_group(self):
+        config = self.load('[priority]\nsend_to_group = true\n', ENV + "TELEGRAM_PRIORITY_CHAT_ID=-2\n")
+        bot = Bot(config, None)
+        message = rich_messages(ITEM, "Short", "FINN", {})[0]
+        message["_route"] = "priority"
+        ok = Mock()
+        ok.json.return_value = {"ok": True}
+        with patch("finn_alert.request", side_effect=[HttpError(400), ok]) as call:
+            bot.send(message)
+        self.assertEqual([c.kwargs["json"]["chat_id"] for c in call.call_args_list], ["-2", "-1"])
+        self.assertFalse(call.call_args.kwargs["json"]["disable_notification"])
+        with patch("finn_alert.request", side_effect=HttpError(400)) as call, self.assertRaises(HttpError):
+            bot.send(rich_messages(ITEM, "Short", "FINN", {})[0])
+        self.assertEqual(call.call_count, 1)
 
     def test_hot_reload_applies_valid_edits_and_ignores_bad_ones(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True):

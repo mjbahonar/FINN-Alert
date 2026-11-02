@@ -490,7 +490,21 @@ class Bot:
             translated.append(html.unescape(value))
         return "\n".join(translated)
 
+    def uses_priority_chat(self, message):
+        return (isinstance(message, dict) and message.get("_route") == "priority"
+                and self.c["priority"]["send_to_group"] and bool(self.c["telegram"].get("priority_chat_id")))
+
     def send(self, text):
+        try:
+            self._send(text)
+        except HttpError as exc:
+            if exc.status_code != 400 or not self.uses_priority_chat(text):
+                raise
+            # A rejected priority group (bot not allowed to post, wrong ID) must not block the whole queue.
+            LOG.warning("Priority group rejected the message (HTTP 400); sending to the main group instead")
+            self._send(text, main_only=True)
+
+    def _send(self, text, main_only=False):
         token = self.c["telegram"]["bot_token"]
         # No automatic POST retry: a network timeout might follow a successful send.
         payload = dict(text) if isinstance(text, dict) else {"text": text}
@@ -500,7 +514,7 @@ class Bot:
         priority = payload.pop("_route", None) == "priority"
         telegram = self.c["telegram"]
         payload["chat_id"] = telegram["chat_id"]
-        if priority and self.c["priority"]["send_to_group"] and telegram.get("priority_chat_id"):
+        if priority and not main_only and self.uses_priority_chat({"_route": "priority"}):
             payload["chat_id"] = telegram["priority_chat_id"]
         if isinstance(text, dict):
             # Listings are silent unless important; plain strings (error alerts) always notify.
