@@ -497,8 +497,8 @@ class Bot:
     def send(self, text):
         try:
             self._send(text)
-        except HttpError as exc:
-            if exc.status_code != 400 or not self.uses_priority_chat(text):
+        except (HttpError, TelegramMediaRejected) as exc:
+            if getattr(exc, "status_code", 400) != 400 or not self.uses_priority_chat(text):
                 raise
             # A rejected priority group (bot not allowed to post, wrong ID) must not block the whole queue.
             LOG.warning("Priority group rejected the message (HTTP 400); sending to the main group instead")

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from finn_alert import Bot, HttpError, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
+from finn_alert import Bot, HttpError, TelegramMediaRejected, ConfigWatcher, priority_reasons, load_config, require_telegram, rich_messages, wait_for_next_poll
 
 ITEM = "https://www.finn.no/recommerce/forsale/item/123"
 BASE = 'search_url = "https://www.finn.no/recommerce/forsale/search?trade_type=2"\n' \
@@ -98,6 +98,10 @@ class PriorityTests(unittest.TestCase):
         with patch("finn_alert.request", side_effect=HttpError(400)) as call, self.assertRaises(HttpError):
             bot.send(rich_messages(ITEM, "Short", "FINN", {})[0])
         self.assertEqual(call.call_count, 1)
+        photo = {"_method": "sendPhoto", "photo": "https://images.finncdn.no/dynamic/960w/x.jpg", "_route": "priority"}
+        with patch.object(bot, "_send", side_effect=[TelegramMediaRejected("no"), None]) as call:
+            bot.send(photo)
+        self.assertEqual([c.kwargs.get("main_only", False) for c in call.call_args_list], [False, True])
 
     def test_hot_reload_applies_valid_edits_and_ignores_bad_ones(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {}, clear=True):
