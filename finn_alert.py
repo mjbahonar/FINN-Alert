@@ -15,8 +15,13 @@ import signal
 import sqlite3
 import threading
 import time
+import unicodedata
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    import tomli as tomllib
 import requests
 from postal_distance import approximate_distance, validate_distance
 from dotenv import dotenv_values
@@ -56,10 +61,61 @@ def finn_url(url):
     return url
 
 
+def read_config_file(path):
+    text = path.read_text(encoding="utf-8-sig")
+    # JSON stays supported so an existing config.json keeps working.
+    return json.loads(text) if path.suffix.lower() == ".json" else tomllib.loads(text)
+
+
+def load_priority(section, setting):
+    """Validate [priority]; lists from the file and from .env are combined (any match counts)."""
+    if not isinstance(section, dict):
+        raise ValueError("priority must be a table")
+    flags = {}
+    for name, default in (("enabled", True), ("send_to_group", False)):
+        flags[name] = section.get(name, default)
+        if not isinstance(flags[name], bool):
+            raise ValueError(f"priority.{name} must be true or false")
+    lists = {}
+    for name, env_name in (("keywords", "PRIORITY_KEYWORDS"), ("postal_codes", "PRIORITY_POSTAL_CODES")):
+        values = section.get(name, [])
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f"priority.{name} must be a list of text values")
+        values = values + re.split(r"[,\n]", setting(env_name))
+        lists[name] = [value.strip() for value in values if value.strip()]
+    for code in lists["postal_codes"]:
+        if not re.fullmatch(r"\d{4}", code):
+            raise ValueError("priority.postal_codes must contain four-digit postal codes")
+    flags["keywords"] = tuple(dict.fromkeys(normalize_text(word) for word in lists["keywords"]))
+    flags["postal_codes"] = frozenset(lists["postal_codes"])
+    return flags
+
+
+def normalize_text(text):
+    return unicodedata.normalize("NFC", text).casefold()
+
+
+def priority_reasons(priority, text, address):
+    """Why a listing is important: keywords found in the original Norwegian text and/or a listed postal code."""
+    if not priority or not priority.get("enabled"):
+        return []
+    folded = normalize_text(text)
+    reasons = [f"keyword \u201c{word}\u201d" for word in priority["keywords"] if word in folded]
+    # FINN's location starts with a four-digit postal code (see postal_distance).
+    match = re.match(r"^\s*(\d{4})(?:\s|$)", address)
+    if match and match.group(1) in priority["postal_codes"]:
+        reasons.append(f"postal code {match.group(1)}")
+    return reasons
+
+
 def load_config(path):
     path = Path(path)
     env = dotenv_values(path.parent / ".env", encoding="utf-8-sig", interpolate=False)
-    c = json.loads(path.read_text(encoding="utf-8-sig"))
+
+    def setting(name):
+        return os.getenv(name) or env.get(name) or ""
+
+    c = read_config_file(path)
     validate_distance(c.get("distance", {}))
     c.setdefault("error_alert_interval_seconds", 1800)
     finn_url(c["search_url"])
@@ -73,15 +129,70 @@ def load_config(path):
         raise ValueError("initial_mode must be send or skip")
     if c["translation"]["provider"] not in ("argos", "google_web", "google_cloud"):
         raise ValueError("Unknown translation provider")
+    telegram = c.get("telegram", {})
+    if not isinstance(telegram, dict) or not isinstance(telegram.get("silent_normal", True), bool):
+        raise ValueError("telegram.silent_normal must be true or false")
     c["telegram"] = {
-        "bot_token": os.getenv("TELEGRAM_BOT_TOKEN") or env.get("TELEGRAM_BOT_TOKEN") or "",
-        "chat_id": os.getenv("TELEGRAM_CHAT_ID") or env.get("TELEGRAM_CHAT_ID") or "",
+        "silent_normal": telegram.get("silent_normal", True),
+        "bot_token": setting("TELEGRAM_BOT_TOKEN"),
+        "chat_id": setting("TELEGRAM_CHAT_ID"),
+        "priority_chat_id": setting("TELEGRAM_PRIORITY_CHAT_ID"),
     }
+    c["priority"] = load_priority(c.get("priority", {}), setting)
     c["translation"]["google_api_key"] = (os.getenv("GOOGLE_TRANSLATE_API_KEY")
                                            or env.get("GOOGLE_TRANSLATE_API_KEY") or "")
     c["translation"]["model_path"] = str(path.parent / c["translation"].get("model_path", "models/nb-en"))
     c["database"] = str(path.parent / c.get("database", "state.sqlite3"))
     return c
+
+
+def require_telegram(c):
+    if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
+        raise ValueError("Set a valid TELEGRAM_BOT_TOKEN in .env or the process environment")
+    if "your_channel" in c["telegram"]["chat_id"] or not c["telegram"]["chat_id"]:
+        raise ValueError("Set TELEGRAM_CHAT_ID in .env or the process environment")
+    if c["priority"]["enabled"] and c["priority"]["send_to_group"] and not c["telegram"]["priority_chat_id"]:
+        raise ValueError("Set TELEGRAM_PRIORITY_CHAT_ID in .env or set priority.send_to_group = false")
+
+
+class ConfigWatcher:
+    """Cheap hot reload: two os.stat calls detect edits; the file is parsed only after a change."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.seen = self.signature()
+
+    def signature(self):
+        result = []
+        for file in (self.path, self.path.parent / ".env"):
+            try:
+                stat = file.stat()
+                result.append((stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                result.append(None)
+        return tuple(result)
+
+    def changed(self):
+        return self.signature() != self.seen
+
+    def reload(self, current):
+        signature = self.signature()
+        if signature == self.seen:
+            return current
+        self.seen = signature
+        try:
+            new = load_config(self.path)
+            require_telegram(new)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            # A bad edit must never stop the bot; keep running with the previous settings.
+            detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+            LOG.error("Configuration reload failed; keeping previous settings: %s", detail)
+            return current
+        if new["database"] != current["database"]:
+            LOG.warning("database changes need a restart; keeping the current database")
+            new["database"] = current["database"]
+        LOG.info("Configuration reloaded")
+        return new
 
 
 def request(session, method, url, **kwargs):
@@ -198,11 +309,11 @@ def parse_photos(source, listing_url):
     return photos
 
 
-def photo_messages(url, photos):
+def photo_messages(url, photos, prefix=""):
     messages = []
     for offset in range(0, len(photos), 10):
         group = photos[offset:offset + 10]
-        caption = f"FINN | Photos {offset + 1}-{offset + len(group)} of {len(photos)}\n{url}"
+        caption = f"{prefix}FINN | Photos {offset + 1}-{offset + len(group)} of {len(photos)}\n{url}"
         if len(group) == 1:
             messages.append({"_method": "sendPhoto", "photo": group[0], "caption": caption})
         else:
@@ -212,8 +323,12 @@ def photo_messages(url, photos):
     return messages
 
 
-def rich_messages(url, body, heading, metadata, original=None):
-    header = (f"<b>{html.escape(heading)}</b>\n"
+def rich_messages(url, body, heading, metadata, original=None, reasons=()):
+    banner = ""
+    if reasons:
+        banner = ("\U0001F6A8 <b>PRIORITY LISTING</b> \U0001F6A8\n"
+                  f"<blockquote>\U0001F3AF Reason: {html.escape(', '.join(reasons))}</blockquote>\n")
+    header = (banner + f"<b>{html.escape(heading)}</b>\n"
               f'<a href="{html.escape(url, quote=True)}">Open FINN listing</a>\n'
               f"Published: {html.escape(metadata.get('published', 'Not provided by FINN'))}\n")
     if metadata.get("updated"):
@@ -228,20 +343,15 @@ def rich_messages(url, body, heading, metadata, original=None):
         label = html.escape(address[:300])
         header += (f'Area: <a href="{html.escape(map_url, quote=True)}">{label}</a>\n' if map_url else f"Area: {label}\n")
         header += f'<a href="{html.escape(google_map_url, quote=True)}">Google Maps</a>\n'
-    buttons = [[{"text": "Copy listing link", "copy_text": {"text": url}}]]
-    if address and len(address) <= 256:
-        buttons[0].append({"text": "Copy address", "copy_text": {"text": address}})
-    if map_url:
-        buttons.append([{"text": "Open map", "url": map_url}])
+    buttons = [[]]
     if google_map_url:
-        buttons.append([{"text": "Google Maps", "url": google_map_url}])
+        buttons[0].append({"text": "Google Maps", "url": google_map_url})
+    buttons[0].append({"text": "Open listing", "url": url})
     messages = []
     parts = (("", part) for part in chunks(body, 1500)) if original is None else zip_longest(
         chunks(original, 700), chunks(body, 700), fillvalue="")
     for original_part, part in parts:
         rows = [list(row) for row in buttons]
-        if len(part) <= 256:
-            rows.append([{"text": "Copy text", "copy_text": {"text": part}}])
         if original is None:
             content = "<pre>" + html.escape(part) + "</pre>"
         else:
@@ -262,6 +372,11 @@ class Bot:
         self.session.headers["User-Agent"] = "FINN-Alert/1.0 (personal search notifier)"
         self.detail_metadata = {}
         self.offline_translator = None
+
+    def set_config(self, config):
+        if config["translation"].get("model_path") != self.c.get("translation", {}).get("model_path"):
+            self.offline_translator = None
+        self.c = config
 
     def fetch(self, url):
         STOP.wait(self.c["request_delay_seconds"])
@@ -382,7 +497,14 @@ class Bot:
         method = payload.pop("_method", "sendMessage")
         if method not in ("sendMessage", "sendPhoto", "sendMediaGroup"):
             raise ServiceError("Unknown Telegram delivery method")
-        payload["chat_id"] = self.c["telegram"]["chat_id"]
+        priority = payload.pop("_route", None) == "priority"
+        telegram = self.c["telegram"]
+        payload["chat_id"] = telegram["chat_id"]
+        if priority and self.c["priority"]["send_to_group"] and telegram.get("priority_chat_id"):
+            payload["chat_id"] = telegram["priority_chat_id"]
+        if isinstance(text, dict):
+            # Listings are silent unless important; plain strings (error alerts) always notify.
+            payload["disable_notification"] = telegram.get("silent_normal", True) and not priority
         endpoint = f"https://api.telegram.org/bot{token}/{method}"
         try:
             r = request(self.session, "POST", endpoint, json=payload)
@@ -393,6 +515,8 @@ class Bot:
             # images after an explicit rejection (never after a timeout).
             files = {}
             upload = dict(payload)
+            if "disable_notification" in upload:
+                upload["disable_notification"] = json.dumps(upload["disable_notification"])
             media = [dict(item) for item in payload.get("media", [])]
             urls = [item["media"] for item in media] if media else [payload["photo"]]
             for index, url in enumerate(urls):
@@ -447,16 +571,27 @@ class Bot:
             distance = None
         if distance is not None:
             metadata["distance_km"] = distance
-        photos = photo_messages(url, metadata.pop("photos", []))
+        reasons = priority_reasons(self.c.get("priority"), original, metadata.get("address", ""))
+        important = bool(reasons)
+        photos = photo_messages(url, metadata.pop("photos", []), "\U0001F6A8 PRIORITY | " if important else "")
+
+        def route(messages):
+            # The route is stored with the queued messages, so a restart keeps every part together.
+            if important:
+                LOG.info("Priority listing (%s): %s", ", ".join(reasons), url)
+                for message in messages:
+                    message["_route"] = "priority"
+            return messages
+
         try:
             body = self.translate(original)
             heading = "FINN | English"
-            return rich_messages(url, body, heading, metadata, original=original) + photos
+            return route(rich_messages(url, body, heading, metadata, original, reasons) + photos)
         except ServiceError as exc:
             LOG.warning("Translation failed; sending original listing: %s", exc)
             body = original
             heading = "FINN | Translation failed. Original text follows."
-        return rich_messages(url, body, heading, metadata) + photos
+        return route(rich_messages(url, body, heading, metadata, reasons=reasons) + photos)
 
     def enqueue(self, items):
         # Baselines belong to a search, so changing filters starts a new baseline.
@@ -529,9 +664,19 @@ def database(path):
     return db
 
 
+def wait_for_next_poll(seconds, watcher):
+    """Sleep until the next poll, but wake early when the configuration files change."""
+    deadline = time.monotonic() + seconds
+    while not STOP.is_set() and not watcher.changed():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        STOP.wait(min(remaining, 10))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, default=Path("config.json"))
+    parser.add_argument("--config", type=Path, default=Path("config.toml"))
     parser.add_argument("--once", action="store_true", help="Run one poll, including delivery")
     parser.add_argument("--preview", action="store_true", help="Print one translated listing; no Telegram or database writes")
     args = parser.parse_args()
@@ -539,6 +684,7 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: STOP.set())
     try:
+        watcher = ConfigWatcher(args.config.resolve())
         c = load_config(args.config.resolve())
         if args.preview:
             bot = Bot(c, None)
@@ -547,10 +693,7 @@ def main():
             title, desc = bot.listing_detail(url)
             print(json.dumps(bot.listing_messages(url, title, desc), ensure_ascii=False, indent=2))
             return 0
-        if not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", c["telegram"]["bot_token"]):
-            raise ValueError("Set a valid TELEGRAM_BOT_TOKEN in .env or the process environment")
-        if "your_channel" in c["telegram"]["chat_id"] or not c["telegram"]["chat_id"]:
-            raise ValueError("Set TELEGRAM_CHAT_ID in .env or the process environment")
+        require_telegram(c)
         # Linux flock prevents two processes from using the same delivery queue.
         with open(c["database"] + ".lock", "a") as lock:
             if os.name == "posix":
@@ -564,6 +707,7 @@ def main():
             try:
                 while not STOP.is_set():
                     start = time.monotonic()
+                    bot.set_config(watcher.reload(bot.c))
                     ok = True
                     try:
                         bot.enqueue(bot.discover())
@@ -573,13 +717,14 @@ def main():
                     ok = bot.deliver() and ok
                     if args.once:
                         return 0 if ok else 1
-                    STOP.wait(max(1, c["poll_interval_seconds"] - (time.monotonic() - start)))
+                    wait_for_next_poll(max(1, bot.c["poll_interval_seconds"] - (time.monotonic() - start)), watcher)
             finally:
                 db.close()
         return 0
     except (ServiceError, ValueError, KeyError, OSError) as exc:
         # Avoid printing config values, credentials, or request URLs.
-        LOG.error("Startup/run failed (%s). Check configuration, connectivity and file permissions.", type(exc).__name__)
+        detail = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+        LOG.error("Startup/run failed (%s). Check configuration, connectivity and file permissions.", detail)
         return 1
 
 

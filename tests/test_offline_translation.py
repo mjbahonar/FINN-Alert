@@ -36,12 +36,11 @@ class OfflineTests(unittest.TestCase):
     def test_env_and_model_paths_follow_custom_config(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            config = json.loads(Path("config.example.json").read_text())
-            (root / "config.json").write_text(json.dumps(config))
+            (root / "config.toml").write_text(Path("config.example.toml").read_text(encoding="utf-8"), encoding="utf-8")
             (root / ".env").write_text("TELEGRAM_BOT_TOKEN=123:fake\nTELEGRAM_CHAT_ID=-123\n")
             with patch.dict(os.environ, {}, clear=True):
-                loaded = load_config(root / "config.json")
+                loaded = load_config(root / "config.toml")
                 self.assertEqual(loaded["telegram"]["chat_id"], "-123")
                 self.assertEqual(loaded["translation"]["model_path"], str(root / "models/nb-en"))
                 with patch.dict(os.environ, {"TELEGRAM_CHAT_ID": "-456"}):
-                    self.assertEqual(load_config(root / "config.json")["telegram"]["chat_id"], "-456")
+                    self.assertEqual(load_config(root / "config.toml")["telegram"]["chat_id"], "-456")

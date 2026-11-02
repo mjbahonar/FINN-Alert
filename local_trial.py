@@ -15,7 +15,7 @@ def main():
     if args.seconds <= 0:
         parser.error('--seconds must be positive')
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-    config = load_config(Path('config.json').resolve())
+    config = load_config(Path('config.toml').resolve())
     config['initial_mode'] = 'skip'
     path = Path('trial-' + str(time.time_ns()) + '.sqlite3')
     db = database(path)

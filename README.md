@@ -8,7 +8,7 @@ Requires Python 3.10+. Ubuntu 22.04 / 24.04 on x86_64 supported. Translation def
 
 ## Quick setup with WinSCP and a terminal kept open
 
-1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, `requirements.txt`, `config.json`, and your private `.env`. For connectivity checks also upload `check_connection.py`. Set the search link and polling interval in `config.json`; set the Telegram token and group/channel destination in `.env` (use `.env.example` as a template).
+1. In WinSCP, create a `finn-alert` directory inside your server user's home directory. Upload `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, `requirements.txt`, `config.toml`, and your private `.env`. For connectivity checks also upload `check_connection.py`. Set the search link and polling interval in `config.toml`; set the Telegram token and group/channel destination in `.env` (use `.env.example` as a template).
 2. Open a terminal on the server and run the following one-time installation:
 
 ```bash
@@ -28,7 +28,7 @@ chmod 600 .env
 python3 finn_alert.py
 ```
 
-Keep this terminal/session running. The bot polls automatically at the interval in `config.json`; there is no need to rerun it for each poll. Press `Ctrl+C` to stop. This direct method does not automatically restart after the process exits or the server reboots.
+Keep this terminal/session running. The bot polls automatically at the interval in `config.toml`; there is no need to rerun it for each poll. Press `Ctrl+C` to stop. This direct method does not automatically restart after the process exits or the server reboots.
 
 For later runs from a new terminal:
 
@@ -38,7 +38,7 @@ source .venv/bin/activate
 python3 finn_alert.py
 ```
 
-Before the first run, set `"initial_mode": "skip"` in `config.json` if you want to baseline existing listings without sending them. Use `"send"` to send existing listings too. On a translation error, the original listing is sent with an English warning. Preserve the generated `state.sqlite3` file to retain delivery history. Restart the program after changing configuration. Run only one instance.
+Before the first run, set `"initial_mode": "skip"` in `config.toml` if you want to baseline existing listings without sending them. Use `"send"` to send existing listings too. On a translation error, the original listing is sent with an English warning. Preserve the generated `state.sqlite3` file to retain delivery history. Configuration changes are applied automatically (see below). Run only one instance.
 
 ## Install on Ubuntu with systemd (alternative)
 
@@ -56,7 +56,7 @@ sudo -u finn-alert .venv/bin/python setup_translation.py
 sudo -u finn-alert cp .env.example .env
 sudo chmod 600 .env
 sudo nano .env
-sudo nano config.json
+sudo nano config.toml
 ```
 
 Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo -u finn-alert .venv/bin/python` in the commands below.
@@ -76,10 +76,37 @@ Skip `useradd` if the account exists. On Windows, use `python` instead of `sudo 
 | `TELEGRAM_BOT_TOKEN` (`.env`) | Complete BotFather token |
 | `TELEGRAM_CHAT_ID` (`.env`) | Numeric group/private-channel ID or public channel `@username` |
 | `translation.provider` | `argos` (default, offline nb to en), `google_web`, or `google_cloud` |
-| `translation.model_path` | Model directory relative to config.json; default `models/nb-en` |
+| `translation.model_path` | Model directory relative to config.toml; default `models/nb-en` |
+| `[telegram] silent_normal` | `true` (default): normal listings are delivered without a notification sound |
+| `[priority]` | Important-listing rules; see "Priority listings" |
+| `TELEGRAM_PRIORITY_CHAT_ID` (`.env`) | Second group for important listings |
+| `PRIORITY_KEYWORDS`, `PRIORITY_POSTAL_CODES` (`.env`) | Comma-separated lists added to the `[priority]` lists |
 | `GOOGLE_TRANSLATE_API_KEY` (`.env`) | API key for `google_cloud` |
 
-The program automatically reads `.env` beside the selected configuration file, including with `--config`. Process environment variables override `.env` values. Keep credentials and the Telegram destination in `.env`; `config.json` is safe to share in Git. Copy `.env.example` to `.env` for a new installation. Restart after editing either file.
+The program automatically reads `.env` beside the selected configuration file, including with `--config`. Process environment variables override `.env` values. Keep credentials and the Telegram destination in `.env`; `config.toml` is safe to share in Git. Copy `.env.example` to `.env` for a new installation.
+
+## Priority listings and silent delivery
+
+Normal listings are sent with `disable_notification`, so they arrive silently; you can unmute the group and still only be alerted for important listings. A listing is **important** when any one of these is true:
+
+- a word from `keywords` appears in the original Norwegian title or description (case-insensitive; it also matches inside compound words, so `sykkel` matches `terrengsykkel`), or
+- its leading four-digit postal code is in `postal_codes`.
+
+```toml
+[priority]
+enabled = true          # master switch
+send_to_group = true    # true: important listings go to TELEGRAM_PRIORITY_CHAT_ID; false: they stay in the main group
+keywords = ["gratis", "sykkel"]
+postal_codes = ["5003", "5006"]
+```
+
+Important listings are marked with a `PRIORITY LISTING` banner and a quoted `Reason:` line naming the matched keyword(s) and/or postal code; their photo albums are captioned `PRIORITY`. Important listings always notify with sound. Set `[telegram] silent_normal = false` to make normal listings notify too. Error alerts always notify. The words and postal codes may also be set in `.env` (comma-separated: `PRIORITY_KEYWORDS=gratis,sykkel`, `PRIORITY_POSTAL_CODES=5003,5006`) and are added to the lists in `config.toml`.
+
+To create the second group: add the bot to it, send `/start@YourBotUsername` there, read its ID with `getUpdates` as shown below, and set `TELEGRAM_PRIORITY_CHAT_ID` in `.env`. An important listing is sent only to the chosen destination (not to both groups). The decision is made when the listing is prepared, so already-queued listings keep their earlier routing.
+
+## Automatic configuration reload
+
+`config.toml` and `.env` are checked with two cheap file-status calls between polls, and the program wakes up early when one changes. A valid edit is applied to the next poll (search URL, polling interval, priority rules, Telegram IDs and token, translation provider, distance, photos); an invalid edit is logged as `Configuration reload failed; keeping previous settings` and the old settings stay active until the next edit. Only `database` needs a restart. Existing `config.json` files still work; TOML is the recommended format and requires Python 3.11+ or the `tomli` package from `requirements.txt`.
 
 ## Telegram setup and group ID
 
@@ -142,11 +169,10 @@ References: [getUpdates](https://core.telegram.org/bots/api#getupdates), [getMe]
 
 Run `python setup_translation.py` once after installing requirements. It downloads the Argos nb-to-en model version 1.9 and installs only its inference files in `models/nb-en`. Setup needs internet; subsequent translation performs no network requests. FINN retrieval and Telegram delivery still need internet. Model files are ignored by Git.
 
-```json
-"translation": {
-  "provider": "argos",
-  "model_path": "models/nb-en"
-}
+```toml
+[translation]
+provider = "argos"
+model_path = "models/nb-en"
 ```
 
 The model path is relative to the selected configuration file. For a custom location, download with `python setup_translation.py --destination /path/to/model` and set `model_path` accordingly. Only Norwegian Bokmal to English is supported by this offline provider; text in other languages is not detected automatically. Quality is imperfect, especially product names and informal wording. Long text is processed in bounded token segments and message parts; source text is not silently truncated; reaching the output limit triggers the original-text fallback.
@@ -174,12 +200,11 @@ This program supports **Cloud Translation Basic v2, standard NMT**, with English
 3. Under **APIs & Services > Library**, enable **Cloud Translation API**.
 4. Under **APIs & Services > Credentials > Create credentials > API key**, create an API key for Basic v2.
 5. Restrict the key to Cloud Translation API. If using IP restrictions, allow the public IP of the machine running this script, including the development machine during testing.
-6. Set the translation provider in `config.json`:
+6. Set the translation provider in `config.toml`:
 
-```json
-"translation": {
-  "provider": "google_cloud"
-}
+```toml
+[translation]
+provider = "google_cloud"
 ```
 
 Put the key in your private `.env`:
@@ -190,7 +215,7 @@ GOOGLE_TRANSLATE_API_KEY=YOUR_GOOGLE_CLOUD_API_KEY
 
 Alternatively supply `GOOGLE_TRANSLATE_API_KEY` in the process environment. Never commit your real key.
 
-7. Run `python check_connection.py` and look for `Translation (google_cloud): OK`. Restart the service after changing configuration.
+7. Run `python check_connection.py` and look for `Translation (google_cloud): OK`.
 
 Official references: [setup](https://docs.cloud.google.com/translate/docs/setup), [authentication](https://docs.cloud.google.com/translate/docs/authentication), [Basic v2 API](https://docs.cloud.google.com/translate/docs/reference/rest/v2/translate).
 
@@ -236,7 +261,7 @@ sudo -u finn-alert .venv/bin/python finn_alert.py --once
 python local_trial.py --seconds 900
 ```
 
-Runs for 15 minutes using `config.json` and an isolated `trial-*.sqlite3` database. Existing listings are baselined; only one existing sample and newly discovered listings are sent. The configured polling interval applies. It may stop slightly later if a network request is in progress. Logs report sent/pending counts. Fallback delivery confirms notifications, not successful translation.
+Runs for 15 minutes using `config.toml` and an isolated `trial-*.sqlite3` database. Existing listings are baselined; only one existing sample and newly discovered listings are sent. The configured polling interval applies. It may stop slightly later if a network request is in progress. Logs report sent/pending counts. Fallback delivery confirms notifications, not successful translation.
 
 ## Ubuntu service
 
@@ -248,13 +273,13 @@ sudo systemctl status finn-alert
 sudo journalctl -u finn-alert -f
 ```
 
-Restart after configuration changes: `sudo systemctl restart finn-alert`. Stop: `sudo systemctl stop finn-alert`.
+No restart is needed after editing `config.toml` or `.env` (except `database`). Restart only after upgrading the code: `sudo systemctl restart finn-alert`. Stop: `sudo systemctl stop finn-alert`.
 
 ## Listing photo albums
 
 All gallery photos exposed in a listing page are extracted in page order. Duplicate thumbnail versions, profile images and unrelated recommended listings are excluded. Photos are sent after the original text and English translation. Tap a photo in Telegram to browse the album.
 
-Each album contains up to 10 photos. Larger galleries are split across multiple albums; a remaining single photo uses `sendPhoto`. Every album or single photo includes the FINN link in its caption. Listings without extractable photos still send text normally. Set `"send_photos": false` in config.json to disable gallery delivery.
+Each album contains up to 10 photos. Larger galleries are split across multiple albums; a remaining single photo uses `sendPhoto`. Every album or single photo includes the FINN link in its caption. Listings without extractable photos still send text normally. Set `"send_photos": false` in config.toml to disable gallery delivery.
 
 Telegram retrieves 960-pixel-wide image URLs directly from FINN's image CDN; the bot does not store photos on the server. Photo URL availability and Telegram's file limits still apply. If a photo or album request fails, its listing remains queued and retries on a later poll. Previously acknowledged albums are checkpointed and skipped on retry. Text is delivered before photos, so an album failure does not prevent the listing text from reaching the chat. The failed photo part remains queued and resumes on a later poll. A network timeout or crash after Telegram accepts an album but before checkpointing may duplicate that album.
 
@@ -266,17 +291,16 @@ References: [Telegram albums](https://core.telegram.org/bots/api#sendmediagroup)
 
 ### Approximate distance (optional)
 
-Configure `distance` in `config.json`:
+Configure `distance` in `config.toml`:
 
-```json
-"distance": {
-  "enabled": true,
-  "origin_latitude": 60.37891870202219,
-  "origin_longitude": 5.356616006956909
-}
+```toml
+[distance]
+enabled = true
+origin_latitude = 60.37891870202219
+origin_longitude = 5.356616006956909
 ```
 
-Set `enabled` to `false` to hide distances. Newly prepared posts show only `Approx. distance: 2.4 km`, without publishing the origin coordinates. This is straight-line distance to the estimated postal-code center, not driving distance or the seller's exact location. Missing or unknown postal codes omit the distance. Existing configurations default to disabled. Restart after changing the configuration; prepared and previously sent messages retain their existing content.
+Set `enabled` to `false` to hide distances. Newly prepared posts show only `Approx. distance: 2.4 km`, without publishing the origin coordinates. This is straight-line distance to the estimated postal-code center, not driving distance or the seller's exact location. Missing or unknown postal codes omit the distance. Existing configurations default to disabled. Prepared and previously sent messages retain their existing content.
 
 Calculations run offline without a Google API key or extra dependencies. Copy `postal_distance.py` and the `data/` directory when installing or upgrading the server. The bundled `data/postal_codes_no.json` was derived from [GeoNames Norway postal data](https://download.geonames.org/export/zip/NO.zip), retrieved October 9, 2026, using estimated WGS84 coordinates. The source archive is dated 2015 and may omit newer postal codes. Attribution: GeoNames, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); source documentation is included in `data/GEONAMES-README.txt`. The derived file retains only postal codes and coordinates.
 
@@ -286,9 +310,9 @@ If Telegram returns HTTP 400 while fetching photo URLs, the bot downloads the FI
 
 Listing-detail HTTP 404 (not found) and 410 (gone) responses mark the listing as `unavailable` in SQLite and continue with the next queued listing. These entries are not retried or repeatedly reported to Telegram. Search-page errors and temporary listing failures such as HTTP 403/429/5xx or network timeouts still use the retry and error-alert behavior below. Preserve `state.sqlite3` when upgrading; no database migration is needed.
 
-Listing messages include the publication date/time **when explicitly available**, and the separately labeled last-update time shown by FINN. Many listings expose only `Sist endret` (last updated); these show `Published: Not provided by FINN` rather than mislabeling the update time as publication. Times retain FINN's displayed local time. The visible address/postal area links to FINN's map and also has an `Open map` button. A postal-area location is not necessarily an exact street address.
+Listing messages include the publication date/time **when explicitly available**, and the separately labeled last-update time shown by FINN. Many listings expose only `Sist endret` (last updated); these show `Published: Not provided by FINN` rather than mislabeling the update time as publication. Times retain FINN's displayed local time. The visible address/postal area links to FINN's map and the buttons below the message are a single row: `Google Maps` and `Open listing`. Listings without an address show only `Open listing`. A postal-area location is not necessarily an exact street address.
 
-Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. `Copy listing link` and `Copy address` buttons copy those fields directly. Telegram's native copy buttons allow only 256 characters, so `Copy text` is provided only for short text parts. Longer text remains complete in the copyable block; the exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, and `requirements.txt`, install the updated requirements, run `python setup_translation.py` if the offline model is not installed, select `argos` in the translation configuration, and run it again; preserve `config.json`, `.env`, and `state.sqlite3`.
+Descriptions appear in a preformatted text block for easy copying in Telegram clients that offer a code-block copy control. The exact copy gesture depends on the Telegram client. Old plain-text queue entries still send normally; newly prepared listings use the new format. To update a simple WinSCP installation, stop the bot, replace `finn_alert.py`, `offline_translation.py`, `setup_translation.py`, and `requirements.txt`, install the updated requirements, run `python setup_translation.py` if the offline model is not installed, select `argos` in the translation configuration, and run it again; preserve `config.toml`, `.env`, and `state.sqlite3`.
 
 FINN search and listing-detail fetch/parsing failures send an English `FINN Alert | Fetch error` notification to the same configured Telegram destination. It includes UTC time, the failing stage, a safe error description (such as HTTP 403/429 or a network timeout), and the FINN page path. Query strings, tokens, and raw network exception details are omitted. Identical errors in the same stage, including errors affecting different listings, are grouped and reported at most once per 30 minutes by default. A different error is reported immediately. The cooldown is stored in SQLite and survives restarts. Existing configurations automatically use the default; add `error_alert_interval_seconds` to customize it.
 
@@ -330,4 +354,4 @@ git status
 
 Tests run without network calls or real messages. Offline model inference has also been tested with socket connections and DNS blocked. Live Telegram authentication, group lookup, test delivery, and FINN extraction succeeded on October 6, 2026. Website translation returned HTTP 429; official API translation needs a real key for a live test.
 
-The local Git repository ignores private `.env` files, databases, and logs. Share `config.json`, `config.example.json`, and `.env.example`; they contain no credentials. No GitHub remote is configured automatically.
+The local Git repository ignores private `.env` files, databases, and logs. Share `config.toml`, `config.example.toml`, and `.env.example`; they contain no credentials. No GitHub remote is configured automatically.

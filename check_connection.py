@@ -7,7 +7,7 @@ from finn_alert import Bot, ServiceError, load_config, parse_detail, parse_searc
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('config.json'))
+    parser.add_argument('--config', type=Path, default=Path('config.toml'))
     parser.add_argument('--send-test', action='store_true')
     args = parser.parse_args()
     try:

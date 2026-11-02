@@ -1,0 +1,38 @@
+# FINN Alert configuration. Safe to share: credentials and group IDs live in .env.
+# Changes are picked up automatically (within seconds); no restart is needed.
+# Exceptions: `database` needs a restart. An invalid edit is logged and ignored.
+
+search_url = "https://www.finn.no/recommerce/forsale/search?location=1.22046.20220&sort=PUBLISHED_DESC&trade_type=2"
+poll_interval_seconds = 300
+error_alert_interval_seconds = 1800
+max_pages = 3
+request_delay_seconds = 2
+initial_mode = "send"          # "send" or "skip"
+database = "state.sqlite3"
+send_photos = true
+
+[translation]
+provider = "argos"
+model_path = "models/nb-en"
+
+[distance]
+enabled = false
+origin_latitude = 60.37891870202219
+origin_longitude = 5.356616006956909
+
+[telegram]
+# true: normal listings arrive without a notification sound.
+silent_normal = true
+
+[priority]
+# A listing is important if ANY keyword appears in its original Norwegian
+# title/description (case-insensitive, matches inside words too, e.g. "sykkel"
+# also matches "terrengsykkel") OR its postal code is in postal_codes.
+# Entries from PRIORITY_KEYWORDS / PRIORITY_POSTAL_CODES in .env (comma-separated)
+# are added to these lists.
+enabled = true
+# true: send important listings, with notification, to TELEGRAM_PRIORITY_CHAT_ID.
+# false: send them to the main group, with notification.
+send_to_group = false
+keywords = ["gratis", "sykkel"]
+postal_codes = ["5003", "5006"]
